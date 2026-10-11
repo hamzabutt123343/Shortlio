@@ -78,6 +78,7 @@ export async function PATCH(request: Request, { params }: Params) {
       body.burnCaptions === undefined &&
       body.captionPreset === undefined &&
       body.captionLanguage === undefined &&
+      body.captionSettings === undefined &&
       body.captionText === undefined;
 
     const updates: Record<string, unknown> = {};
@@ -106,6 +107,7 @@ export async function PATCH(request: Request, { params }: Params) {
       body.burnCaptions !== undefined ||
       body.captionPreset !== undefined ||
       body.captionLanguage !== undefined ||
+      body.captionSettings !== undefined ||
       body.captionText !== undefined;
 
     if (needsRender && !cheapOnly) {

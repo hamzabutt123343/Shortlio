@@ -14,6 +14,7 @@ const createSchema = z.object({
   aspectRatio: z.enum(["9:16", "1:1", "16:9"]).default("9:16"),
   captionPreset: z.string().default("classic_white"),
   captionLanguage: z.string().default("en"),
+  captionSettings: z.record(z.string(), z.unknown()).optional().default({}),
   platformPreset: z
     .enum(["youtube_shorts", "tiktok", "instagram_reels", "custom"])
     .default("youtube_shorts"),
@@ -83,6 +84,7 @@ export async function POST(request: Request) {
       clip_count: body.clipCount,
       aspect_ratio: body.aspectRatio,
       caption_preset: body.captionPreset,
+      caption_settings: body.captionSettings,
       language: body.captionLanguage,
       platform_preset: body.platformPreset,
       quality: body.quality,

@@ -2,8 +2,9 @@
 
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
+import { CaptionStylePicker } from "@/components/caption-style-picker";
 import { Button, Card, Input, Label } from "@/components/ui";
-import { CAPTION_PRESETS } from "@/lib/captions/presets";
+import type { CaptionSettings } from "@/lib/captions/style";
 import { CLIP_COUNT_OPTIONS, type UsageInfo } from "@/lib/types";
 
 export function NewProjectForm({ usage }: { usage: UsageInfo }) {
@@ -13,6 +14,7 @@ export function NewProjectForm({ usage }: { usage: UsageInfo }) {
   const [aspectRatio, setAspectRatio] = useState<"9:16" | "1:1" | "16:9">("9:16");
   const [captionPreset, setCaptionPreset] = useState("classic_white");
   const [captionLanguage, setCaptionLanguage] = useState("en");
+  const [captionSettings, setCaptionSettings] = useState<CaptionSettings>({});
   const [platformPreset, setPlatformPreset] = useState("youtube_shorts");
   const [error, setError] = useState<string | null>(null);
   const [workerNote, setWorkerNote] = useState<string | null>(null);
@@ -39,6 +41,7 @@ export function NewProjectForm({ usage }: { usage: UsageInfo }) {
           aspectRatio,
           captionPreset,
           captionLanguage,
+          captionSettings,
           platformPreset,
         }),
       });
@@ -62,7 +65,7 @@ export function NewProjectForm({ usage }: { usage: UsageInfo }) {
       <p className="mt-1 text-sm text-[var(--text-muted)]">
         Paste a public video URL. Analysis starts after you create the project.
       </p>
-      <form onSubmit={onSubmit} className="mt-5 space-y-4">
+      <form onSubmit={onSubmit} className="mt-5 space-y-5">
         <div>
           <Label htmlFor="url">Video URL</Label>
           <Input
@@ -116,34 +119,17 @@ export function NewProjectForm({ usage }: { usage: UsageInfo }) {
               <option value="16:9">16:9 · 1920×1080</option>
             </select>
           </div>
-          <div>
-            <Label htmlFor="captions">Caption preset</Label>
-            <select
-              id="captions"
-              className="w-full rounded-[10px] border border-[var(--border)] bg-[var(--bg-elevated)] px-3 py-2.5 text-sm"
-              value={captionPreset}
-              onChange={(e) => setCaptionPreset(e.target.value)}
-            >
-              {CAPTION_PRESETS.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <Label htmlFor="lang">Caption language</Label>
-            <select
-              id="lang"
-              className="w-full rounded-[10px] border border-[var(--border)] bg-[var(--bg-elevated)] px-3 py-2.5 text-sm"
-              value={captionLanguage}
-              onChange={(e) => setCaptionLanguage(e.target.value)}
-            >
-              <option value="en">English (default)</option>
-              <option value="hinglish">Hinglish</option>
-            </select>
-          </div>
         </div>
+
+        <CaptionStylePicker
+          presetId={captionPreset}
+          language={captionLanguage}
+          settings={captionSettings}
+          onPresetChange={setCaptionPreset}
+          onLanguageChange={setCaptionLanguage}
+          onSettingsChange={setCaptionSettings}
+          density="compact"
+        />
 
         {usage.plan === "free" && (
           <p className="text-xs text-[var(--text-muted)]">

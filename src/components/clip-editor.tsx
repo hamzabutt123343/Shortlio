@@ -1,8 +1,15 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import {
+  CaptionOverlayPreview,
+  CaptionStylePicker,
+} from "@/components/caption-style-picker";
 import { Badge, Button, Card, Input, Label } from "@/components/ui";
-import { CAPTION_PRESETS, type CaptionStyle } from "@/lib/captions/presets";
+import {
+  resolveCaptionStyle,
+  type CaptionSettings,
+} from "@/lib/captions/style";
 import type { Clip } from "@/lib/types";
 
 export function ClipEditor({
@@ -19,6 +26,9 @@ export function ClipEditor({
   const [endTime, setEndTime] = useState(String(initialClip.end_time));
   const [captionPreset, setCaptionPreset] = useState(initialClip.caption_preset);
   const [captionLanguage, setCaptionLanguage] = useState(initialClip.caption_language);
+  const [captionSettings, setCaptionSettings] = useState<CaptionSettings>(
+    (initialClip.caption_settings as CaptionSettings) ?? {},
+  );
   const [burnCaptions, setBurnCaptions] = useState(initialClip.burn_captions);
   const [outputFormat, setOutputFormat] = useState(initialClip.output_format);
   const [quality, setQuality] = useState(initialClip.quality);
@@ -29,9 +39,9 @@ export function ClipEditor({
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const preset = useMemo(
-    () => CAPTION_PRESETS.find((p) => p.id === captionPreset) ?? CAPTION_PRESETS[0],
-    [captionPreset],
+  const style = useMemo(
+    () => resolveCaptionStyle(captionPreset, captionSettings),
+    [captionPreset, captionSettings],
   );
 
   useEffect(() => {
@@ -60,6 +70,7 @@ export function ClipEditor({
           endTime: Number(endTime),
           captionPreset,
           captionLanguage,
+          captionSettings,
           burnCaptions,
           outputFormat,
           quality,
@@ -106,7 +117,7 @@ export function ClipEditor({
             {clip.render_status}
           </Badge>
         </div>
-        <div className="aspect-[9/16] max-h-[640px] overflow-hidden rounded-[12px] border border-[var(--border)] bg-black">
+        <div className="relative aspect-[9/16] max-h-[640px] overflow-hidden rounded-[12px] border border-[var(--border)] bg-black">
           {signedUrl ? (
             <video key={signedUrl} src={signedUrl} controls className="h-full w-full object-contain" />
           ) : (
@@ -114,8 +125,11 @@ export function ClipEditor({
               Preview unavailable until render completes
             </div>
           )}
+          <CaptionOverlayPreview style={style} language={captionLanguage} />
         </div>
-        <CaptionPreview preset={preset} language={captionLanguage} />
+        <p className="mt-2 text-xs text-[var(--text-muted)]">
+          Live caption overlay — style changes update instantly before re-render.
+        </p>
         {clip.reframe_warning && (
           <p className="mt-3 text-sm text-[var(--warning)]">
             Automatic subject tracking used a fallback. Adjust focal position and re-render.
@@ -139,33 +153,17 @@ export function ClipEditor({
               <Input id="end" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
             </div>
           </div>
-          <div>
-            <Label htmlFor="preset">Caption preset</Label>
-            <select
-              id="preset"
-              className="w-full rounded-[10px] border border-[var(--border)] bg-[var(--bg-elevated)] px-3 py-2.5 text-sm"
-              value={captionPreset}
-              onChange={(e) => setCaptionPreset(e.target.value)}
-            >
-              {CAPTION_PRESETS.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <Label htmlFor="lang">Caption language</Label>
-            <select
-              id="lang"
-              className="w-full rounded-[10px] border border-[var(--border)] bg-[var(--bg-elevated)] px-3 py-2.5 text-sm"
-              value={captionLanguage}
-              onChange={(e) => setCaptionLanguage(e.target.value)}
-            >
-              <option value="en">English</option>
-              <option value="hinglish">Hinglish</option>
-            </select>
-          </div>
+
+          <CaptionStylePicker
+            presetId={captionPreset}
+            language={captionLanguage}
+            settings={captionSettings}
+            onPresetChange={setCaptionPreset}
+            onLanguageChange={setCaptionLanguage}
+            onSettingsChange={setCaptionSettings}
+            density="full"
+          />
+
           <div>
             <Label htmlFor="aspect">Aspect ratio</Label>
             <select
@@ -224,42 +222,6 @@ export function ClipEditor({
           </div>
         </Card>
       </div>
-    </div>
-  );
-}
-
-function CaptionPreview({ preset, language }: { preset: CaptionStyle; language: string }) {
-  const sample =
-    language === "hinglish"
-      ? "Yeh moment bilkul viral hone wala hai"
-      : "This is the moment that changes everything";
-
-  return (
-    <div className="mt-4 rounded-[10px] border border-[var(--border)] bg-[var(--bg-elevated)] p-4">
-      <p className="mb-2 text-xs uppercase tracking-wide text-[var(--text-muted)]">
-        Caption preview · {preset.name}
-      </p>
-      <p
-        className="text-center leading-tight"
-        style={{
-          color: preset.textColor,
-          fontSize: Math.min(preset.fontSize / 2.4, 28),
-          fontWeight: preset.fontWeight,
-          textShadow: preset.shadow ? `0 2px ${preset.outlineWidth}px ${preset.outlineColor}` : undefined,
-          background:
-            preset.backgroundOpacity > 0
-              ? `rgba(0,0,0,${preset.backgroundOpacity})`
-              : "transparent",
-          padding: "8px 10px",
-          borderRadius: 8,
-        }}
-      >
-        <span style={{ color: preset.highlightColor }}>{sample.split(" ")[0]}</span>{" "}
-        {sample.split(" ").slice(1).join(" ")}
-      </p>
-      <p className="mt-2 text-xs text-[var(--text-muted)]">
-        Animation: {preset.animation} · max {preset.maxWordsPerCaption} words/line
-      </p>
     </div>
   );
 }
