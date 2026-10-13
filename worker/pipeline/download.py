@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 
-from config import Settings, get_settings, run_subprocess, validate_public_http_url
+from config import Settings, get_settings, run_subprocess, validate_public_http_url, ytdlp_base_args
 
 logger = logging.getLogger(__name__)
 
 
 def segment_cache_path(work_dir: Path, index: int) -> Path:
     return work_dir / f"segment_{index:03d}.mp4"
+
+
+def _global_segment_path(settings: Settings, url: str, start: float, end: float) -> Path:
+    key = f"{url.strip()}|{start:.3f}|{end:.3f}"
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:24]
+    root = settings.resolved_temp_dir() / "segment_cache"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / f"{digest}.mp4"
 
 
 def _section_spec(start: float, end: float) -> str:
@@ -33,11 +42,12 @@ def download_section_ytdlp(
     section = _section_spec(start, end)
     out_tpl = str(dest.with_suffix(".%(ext)s"))
     cmd = [
-        "yt-dlp",
+        *ytdlp_base_args(settings),
         "--download-sections",
         section,
+        # Cap at 720p — plenty for Shorts, much faster to download/encode
         "-f",
-        "bv*+ba/b",
+        "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b",
         "--merge-output-format",
         "mp4",
         "-o",
@@ -69,9 +79,9 @@ def _fallback_download_and_trim(
     full = dest.parent / "source_full.mp4"
     if not full.exists() or full.stat().st_size == 0:
         cmd = [
-            "yt-dlp",
+            *ytdlp_base_args(settings),
             "-f",
-            "bv*+ba/b",
+            "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b",
             "--merge-output-format",
             "mp4",
             "-o",
@@ -133,7 +143,37 @@ def download_moment_segment(
     pad = padding if padding is not None else settings.segment_padding_seconds
     start_p = max(0.0, start - pad)
     end_p = end + pad
+    # Reuse across jobs so caption-only re-renders skip redownload
+    global_dest = _global_segment_path(settings, source_url, start_p, end_p)
+    if global_dest.exists() and global_dest.stat().st_size > 0:
+        work_dir = settings.resolved_temp_dir() / job_id / "segments"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        dest = segment_cache_path(work_dir, index)
+        if not dest.exists():
+            try:
+                if hasattr(global_dest, "hardlink_to"):
+                    dest.hardlink_to(global_dest)
+                else:
+                    raise OSError("no hardlink")
+            except OSError:
+                import shutil
+
+                shutil.copy2(global_dest, dest)
+        return dest if dest.exists() else global_dest
+
+    downloaded = download_section_ytdlp(
+        source_url, start_p, end_p, global_dest, settings=settings
+    )
     work_dir = settings.resolved_temp_dir() / job_id / "segments"
     work_dir.mkdir(parents=True, exist_ok=True)
     dest = segment_cache_path(work_dir, index)
-    return download_section_ytdlp(source_url, start_p, end_p, dest, settings=settings)
+    if downloaded.resolve() != dest.resolve():
+        try:
+            if not dest.exists():
+                dest.hardlink_to(downloaded)
+        except OSError:
+            import shutil
+
+            if not dest.exists():
+                shutil.copy2(downloaded, dest)
+    return dest if dest.exists() else downloaded

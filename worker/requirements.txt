@@ -3,10 +3,13 @@ httpx==0.28.1
 pydantic==2.10.6
 pydantic-settings==2.7.1
 python-dotenv==1.0.1
-yt-dlp==2025.1.26
+yt-dlp>=2025.1.26
 faster-whisper==1.1.1
+# PyAV 19 removed metadata_errors=; faster-whisper still passes it
+av>=11,<19
+requests==2.32.3
 opencv-python-headless==4.10.0.84
 numpy==2.2.2
-mediapipe==0.10.21
+mediapipe==0.10.35
 Pillow==11.1.0
 redis==5.2.1

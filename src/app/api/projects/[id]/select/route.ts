@@ -11,6 +11,8 @@ const schema = z.object({
   aspectRatio: z.enum(["9:16", "1:1", "16:9"]).optional(),
   captionPreset: z.string().optional(),
   captionLanguage: z.string().optional(),
+  captionSettings: z.record(z.string(), z.unknown()).optional(),
+  cropSettings: z.record(z.string(), z.unknown()).optional(),
 });
 
 /** Re-select candidates and enqueue a render-only job when analysis already finished. */
@@ -49,7 +51,14 @@ export async function POST(request: Request, { params }: Params) {
       candidate_ids: body.candidateIds,
       aspect_ratio: body.aspectRatio ?? "9:16",
       caption_preset: body.captionPreset ?? "classic_white",
+      caption_settings: body.captionSettings ?? {},
       language: body.captionLanguage ?? "en",
+      crop_settings: body.cropSettings ?? {
+        focal_x: 0.5,
+        mode: "auto",
+        speaker_focus: true,
+        tracking_mode: "hard_cut",
+      },
       mode: "render_selected",
     };
 

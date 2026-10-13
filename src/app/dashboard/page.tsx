@@ -1,13 +1,12 @@
-import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
 import { NewProjectForm } from "@/components/new-project-form";
-import { Badge, Card, EmptyState } from "@/components/ui";
+import { RecentProjects } from "@/components/recent-projects";
 import { redirect } from "next/navigation";
 import { getSessionUser } from "@/lib/auth/session";
 import { getUsageInfo } from "@/lib/quota";
 import { createClient } from "@/lib/supabase/server";
 import { getWorkerStatus } from "@/lib/worker-status";
-import { STAGE_LABELS } from "@/lib/types";
+import type { Project } from "@/lib/types";
 
 export default async function DashboardPage() {
   const user = await getSessionUser();
@@ -49,42 +48,7 @@ export default async function DashboardPage() {
           <h2 className="mb-3 font-[family-name:var(--font-display)] text-lg font-semibold">
             Recent projects
           </h2>
-          {!projects?.length ? (
-            <EmptyState
-              title="No projects yet"
-              description="Paste a supported public video URL above to start your first Shortlio project."
-            />
-          ) : (
-            <div className="space-y-3">
-              {projects.map((project) => (
-                <Link key={project.id} href={`/projects/${project.id}`}>
-                  <Card className="mb-3 transition hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="truncate font-medium">
-                          {project.source_title || project.source_url}
-                        </p>
-                        <p className="mt-1 truncate text-xs text-[var(--text-muted)]">
-                          {project.source_platform} · {project.requested_clip_count} clips
-                        </p>
-                      </div>
-                      <Badge
-                        tone={
-                          project.status === "ready"
-                            ? "success"
-                            : project.status === "failed"
-                              ? "danger"
-                              : "accent"
-                        }
-                      >
-                        {STAGE_LABELS[project.status] || project.status}
-                      </Badge>
-                    </div>
-                  </Card>
-                </Link>
-              ))}
-            </div>
-          )}
+          <RecentProjects projects={(projects ?? []) as Project[]} />
         </section>
       </div>
     </AppShell>

@@ -26,7 +26,7 @@ export type ProgressStage =
 
 export type AspectRatio = "9:16" | "1:1" | "16:9";
 export type PlatformPreset = "youtube_shorts" | "tiktok" | "instagram_reels" | "custom";
-export type CaptionLanguage = "en" | "hinglish" | string;
+export type CaptionLanguage = "en" | "hinglish" | "hi" | "ur" | "ar" | "auto" | string;
 
 export type CaptionPresetId =
   | "classic_white"
@@ -36,7 +36,10 @@ export type CaptionPresetId =
   | "clean_minimal"
   | "neon_accent"
   | "podcast_bold"
-  | "creator_style";
+  | "creator_style"
+  | "cinematic_box"
+  | "gaming_hype"
+  | "typewriter";
 
 export interface Profile {
   id: string;
@@ -152,7 +155,7 @@ export interface UsageInfo {
 }
 
 export const FREE_DAILY_CLIP_LIMIT = 3;
-export const CLIP_COUNT_OPTIONS = [2, 3, 5, 10] as const;
+export const CLIP_COUNT_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
 
 export const STAGE_LABELS: Record<string, string> = {
   queued: "Queued",
@@ -165,4 +168,14 @@ export const STAGE_LABELS: Record<string, string> = {
   ready: "Ready",
   failed: "Failed",
   cancelled: "Cancelled",
+  // Legacy values accidentally stored via str(Enum) on Python 3.11+
+  "ProgressStage.FETCHING_TRANSCRIPT": "Fetching transcript",
+  "ProgressStage.TRANSCRIBING_AUDIO": "Transcribing audio",
+  "ProgressStage.ANALYZING_MOMENTS": "Analyzing moments",
+  "ProgressStage.FETCHING_SELECTED_SEGMENTS": "Fetching selected segments",
+  "ProgressStage.DETECTING_SUBJECTS": "Detecting subjects",
+  "ProgressStage.RENDERING_CLIPS": "Rendering clips",
+  "ProgressStage.READY": "Ready",
+  "ProgressStage.FAILED": "Failed",
+  "ProgressStage.CANCELLED": "Cancelled",
 };

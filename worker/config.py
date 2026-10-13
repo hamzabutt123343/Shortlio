@@ -41,9 +41,13 @@ class Settings(BaseSettings):
     transcription_provider: TranscriptionProvider = Field(
         default="local_faster_whisper", alias="TRANSCRIPTION_PROVIDER"
     )
-    whisper_model: str = Field(default="base", alias="WHISPER_MODEL")
+    # tiny/base are best for CPU speed; use small+ only with CUDA
+    whisper_model: str = Field(default="tiny", alias="WHISPER_MODEL")
     whisper_device: str = Field(default="auto", alias="WHISPER_DEVICE")
     whisper_compute_type: str = Field(default="default", alias="WHISPER_COMPUTE_TYPE")
+    whisper_beam_size: int = Field(default=1, alias="WHISPER_BEAM_SIZE")
+    whisper_batch_size: int = Field(default=8, alias="WHISPER_BATCH_SIZE")
+    ytdlp_js_runtime: str = Field(default="node", alias="YTDLP_JS_RUNTIME")
 
     llm_provider: LLMProvider = Field(default="heuristic", alias="LLM_PROVIDER")
     groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
@@ -177,6 +181,17 @@ _YOUTUBE_RE = re.compile(
 
 def is_youtube_url(url: str) -> bool:
     return bool(_YOUTUBE_RE.match(url.strip()))
+
+
+def ytdlp_base_args(settings: Settings | None = None) -> list[str]:
+    """Common yt-dlp flags (JS runtime for modern YouTube extraction)."""
+    settings = settings or get_settings()
+    args = ["yt-dlp", "--no-playlist"]
+    runtime = (settings.ytdlp_js_runtime or "").strip()
+    if runtime:
+        path = shutil.which(runtime)
+        args.extend(["--js-runtimes", f"{runtime}:{path}" if path else runtime])
+    return args
 
 
 def run_subprocess(

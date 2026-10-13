@@ -5,13 +5,20 @@ import { cn, Label } from "@/components/ui";
 import { CAPTION_PRESETS, type CaptionStyle } from "@/lib/captions/presets";
 import {
   ANIMATION_OPTIONS,
+  CAPTION_FONT_OPTIONS,
+  CAPTION_LANGUAGE_OPTIONS,
   HIGHLIGHT_SWATCHES,
   POSITION_OPTIONS,
   captionSettingsDiff,
+  captionStyleKey,
   fontStackFor,
+  getCaptionStyleMode,
+  languageDir,
   resolveCaptionStyle,
   sampleCaptionText,
+  settingsForPresetMode,
   type CaptionSettings,
+  type CaptionStyleMode,
 } from "@/lib/captions/style";
 
 type Props = {
@@ -21,6 +28,8 @@ type Props = {
   onPresetChange: (id: string) => void;
   onLanguageChange?: (lang: string) => void;
   onSettingsChange?: (settings: CaptionSettings) => void;
+  /** Fired after a grid preset is applied (mode=preset, fine-tune cleared). */
+  onPresetApplied?: (id: string, settings: CaptionSettings) => void;
   /** compact = project create; full = editor with more controls */
   density?: "compact" | "full";
   className?: string;
@@ -33,6 +42,7 @@ export function CaptionStylePicker({
   onPresetChange,
   onLanguageChange,
   onSettingsChange,
+  onPresetApplied,
   density = "full",
   className,
 }: Props) {
@@ -41,16 +51,33 @@ export function CaptionStylePicker({
     () => resolveCaptionStyle(presetId, settings),
     [presetId, settings],
   );
+  const styleMode: CaptionStyleMode = useMemo(
+    () => getCaptionStyleMode(settings),
+    [settings],
+  );
+  const isFinetune = styleMode === "finetune";
 
   function patch(partial: Partial<CaptionStyle>) {
     if (!onSettingsChange) return;
     const next = { ...style, ...partial };
+    // Any manual tweak switches authority to finetune mode.
     onSettingsChange(captionSettingsDiff(presetId, next));
   }
 
   function selectPreset(id: string) {
+    // Preset has highest priority: clear fine-tune overrides and mark mode=preset.
+    const next = settingsForPresetMode();
     onPresetChange(id);
-    onSettingsChange?.({});
+    onSettingsChange?.(next);
+    onPresetApplied?.(id, next);
+    setShowTune(true);
+  }
+
+  function resetToPreset() {
+    if (!onSettingsChange) return;
+    const next = settingsForPresetMode();
+    onSettingsChange(next);
+    onPresetApplied?.(presetId, next);
   }
 
   return (
@@ -61,7 +88,14 @@ export function CaptionStylePicker({
             Caption style
           </p>
           <p className="mt-0.5 text-sm text-[var(--text-muted)]">
-            Preview updates live — pick a look, then fine-tune.
+            Click a preset to apply it immediately (highest priority). Fine-tune only when you want custom overrides.
+          </p>
+          <p className="mt-1 text-xs text-[var(--text-muted)]">
+            Active source:{" "}
+            <span className="font-semibold text-[var(--text)]">
+              {isFinetune ? "Fine-tune" : "Preset"}
+            </span>
+            {!isFinetune ? " · fine-tune overrides ignored" : " · overrides merge onto preset"}
           </p>
         </div>
         {onLanguageChange && (
@@ -73,8 +107,11 @@ export function CaptionStylePicker({
               value={language}
               onChange={(e) => onLanguageChange(e.target.value)}
             >
-              <option value="en">English</option>
-              <option value="hinglish">Hinglish</option>
+              {CAPTION_LANGUAGE_OPTIONS.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}
+                </option>
+              ))}
             </select>
           </div>
         )}
@@ -86,7 +123,11 @@ export function CaptionStylePicker({
           density === "full" ? "lg:grid-cols-[180px_1fr]" : "sm:grid-cols-[140px_1fr]",
         )}
       >
-        <CaptionPhonePreview style={style} language={language} />
+        <CaptionPhonePreview
+          key={`${presetId}-${captionStyleKey(style)}-${language}`}
+          style={style}
+          language={language}
+        />
 
         <div className="min-w-0 space-y-3">
           <div
@@ -121,16 +162,102 @@ export function CaptionStylePicker({
 
           {onSettingsChange && (
             <div className="rounded-[10px] border border-[var(--border)] bg-[var(--bg-elevated)]/60">
-              <button
-                type="button"
-                className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium"
-                onClick={() => setShowTune((v) => !v)}
-              >
-                Fine-tune style
-                <span className="text-[var(--text-muted)]">{showTune ? "−" : "+"}</span>
-              </button>
+              <div className="flex items-center justify-between px-3 py-2.5">
+                <button
+                  type="button"
+                  className="flex items-center gap-2 text-sm font-medium"
+                  onClick={() => setShowTune((v) => !v)}
+                >
+                  Fine-tune style
+                  <span
+                    className="rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--text-muted)]"
+                    title={`styleMode=${styleMode}`}
+                  >
+                    {styleMode}
+                  </span>
+                  <span className="text-[var(--text-muted)]">{showTune ? "−" : "+"}</span>
+                </button>
+                {isFinetune && (
+                  <button
+                    type="button"
+                    onClick={resetToPreset}
+                    className="text-xs text-[var(--accent)] hover:underline"
+                  >
+                    Reset to preset
+                  </button>
+                )}
+              </div>
               {showTune && (
                 <div className="space-y-4 border-t border-[var(--border)] px-3 py-3">
+                  {/* Preset color summary */}
+                  <div className="rounded-md bg-[var(--bg)] p-3">
+                    <p className="mb-2 text-xs font-medium text-[var(--text-muted)]">
+                      Current Colors
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      <div className="flex items-center gap-1.5">
+                        <div
+                          className="h-5 w-5 rounded border border-[var(--border)]"
+                          style={{ background: style.textColor }}
+                        />
+                        <span className="text-xs">Text</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <div
+                          className="h-5 w-5 rounded border border-[var(--border)]"
+                          style={{ background: style.highlightColor }}
+                        />
+                        <span className="text-xs">Highlight</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <div
+                          className="h-5 w-5 rounded border border-[var(--border)]"
+                          style={{ background: style.outlineColor }}
+                        />
+                        <span className="text-xs">Outline</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <Label>Position</Label>
+                    <p className="mt-0.5 text-xs text-[var(--text-muted)]">
+                      Choose where captions appear on screen
+                    </p>
+                    <div className="mt-2 grid grid-cols-3 gap-2">
+                      {POSITION_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => patch({ position: opt.id })}
+                          className={cn(
+                            "rounded-[8px] border px-3 py-3 text-sm font-semibold transition",
+                            style.position === opt.id
+                              ? "border-[var(--accent)] bg-[var(--accent)] text-white shadow-md"
+                              : "border-[var(--border)] hover:border-[var(--accent)] hover:bg-[var(--surface-hover)]",
+                          )}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <Label htmlFor="cap-font">Font</Label>
+                    <select
+                      id="cap-font"
+                      className="mt-1 w-full rounded-[8px] border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm"
+                      value={style.fontFamily}
+                      onChange={(e) => patch({ fontFamily: e.target.value })}
+                    >
+                      {CAPTION_FONT_OPTIONS.map((font) => (
+                        <option key={font} value={font}>
+                          {font}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                   <div>
                     <Label>Highlight color</Label>
                     <div className="mt-1.5 flex flex-wrap gap-2">
@@ -202,27 +329,6 @@ export function CaptionStylePicker({
                   </div>
 
                   <div>
-                    <Label>Position</Label>
-                    <div className="mt-1.5 grid grid-cols-3 gap-2">
-                      {POSITION_OPTIONS.map((opt) => (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => patch({ position: opt.id })}
-                          className={cn(
-                            "rounded-[8px] border px-2 py-2 text-xs font-medium transition",
-                            style.position === opt.id
-                              ? "border-[var(--accent)] bg-[var(--accent-dim)] text-[var(--accent)]"
-                              : "border-[var(--border)] hover:bg-[var(--surface-hover)]",
-                          )}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div>
                     <Label>Animation</Label>
                     <div className="mt-1.5 grid grid-cols-3 gap-2 sm:grid-cols-5">
                       {ANIMATION_OPTIONS.map((opt) => (
@@ -280,18 +386,27 @@ export function CaptionStylePicker({
                       <Label htmlFor="cap-bg">
                         Background · {Math.round(style.backgroundOpacity * 100)}%
                       </Label>
-                      <input
-                        id="cap-bg"
-                        type="range"
-                        min={0}
-                        max={0.8}
-                        step={0.05}
-                        value={style.backgroundOpacity}
-                        onChange={(e) =>
-                          patch({ backgroundOpacity: Number(e.target.value) })
-                        }
-                        className="mt-1 w-full accent-[var(--accent)]"
-                      />
+                      <div className="mt-1 flex items-center gap-2">
+                        <input
+                          type="color"
+                          value={style.backgroundColor}
+                          onChange={(e) => patch({ backgroundColor: e.target.value })}
+                          className="h-9 w-12 cursor-pointer rounded border border-[var(--border)] bg-transparent"
+                          aria-label="Background color"
+                        />
+                        <input
+                          id="cap-bg"
+                          type="range"
+                          min={0}
+                          max={0.8}
+                          step={0.05}
+                          value={style.backgroundOpacity}
+                          onChange={(e) =>
+                            patch({ backgroundOpacity: Number(e.target.value) })
+                          }
+                          className="flex-1 accent-[var(--accent)]"
+                        />
+                      </div>
                     </div>
                     <label className="mt-6 flex items-center gap-2 text-sm">
                       <input
@@ -317,22 +432,44 @@ export function CaptionOverlayPreview({
   style,
   language,
   className,
+  text,
+  wordIndex,
+  playing,
+  /** When true and text is empty, show language sample so style tweaks stay visible. */
+  sampleFallback = false,
 }: {
   style: CaptionStyle;
   language: string;
   className?: string;
+  /** Live transcript line */
+  text?: string | null;
+  wordIndex?: number;
+  playing?: boolean;
+  sampleFallback?: boolean;
 }) {
+  const hasText = Boolean(text?.trim()) || sampleFallback;
+  if (!hasText) return null;
   return (
     <div
+      key={captionStyleKey(style)}
       className={cn(
         "pointer-events-none absolute inset-0 flex px-4",
         style.position === "top" && "items-start pt-[12%]",
         style.position === "center" && "items-center",
-        style.position === "bottom" && "items-end pb-[14%]",
+        style.position === "bottom" && "items-end pb-[18%]",
         className,
       )}
+      dir={languageDir(language)}
     >
-      <AnimatedCaptionText style={style} language={language} scale={0.42} />
+      <AnimatedCaptionText
+        style={style}
+        language={language}
+        scale={0.9}
+        text={text}
+        wordIndex={wordIndex}
+        playing={playing}
+        sampleFallback={sampleFallback}
+      />
     </div>
   );
 }
@@ -364,7 +501,12 @@ function CaptionPhonePreview({
             style.position === "bottom" && "bottom-[16%]",
           )}
         >
-          <AnimatedCaptionText style={style} language={language} scale={0.28} />
+          <AnimatedCaptionText
+            style={style}
+            language={language}
+            scale={0.38}
+            sampleFallback
+          />
         </div>
         <p className="absolute bottom-2 left-0 right-0 text-center text-[9px] text-white/40">
           Live preview
@@ -399,64 +541,103 @@ function AnimatedCaptionText({
   style,
   language,
   scale,
+  text,
+  wordIndex,
+  playing,
+  sampleFallback = true,
 }: {
   style: CaptionStyle;
   language: string;
   scale: number;
+  text?: string | null;
+  wordIndex?: number;
+  playing?: boolean;
+  sampleFallback?: boolean;
 }) {
-  const full = sampleCaptionText(language);
+  const full = text?.trim() || (sampleFallback ? sampleCaptionText(language) : "");
+  const styleKey = captionStyleKey(style);
   const words = useMemo(() => {
+    if (!full) return [] as string[];
     const all = full.split(/\s+/).filter(Boolean);
     return all.slice(0, Math.max(1, style.maxWordsPerCaption));
   }, [full, style.maxWordsPerCaption]);
 
-  const [active, setActive] = useState(0);
+  const [animActive, setAnimActive] = useState(0);
   const [tick, setTick] = useState(0);
+  const synced = typeof wordIndex === "number";
+  const active = synced
+    ? wordIndex
+    : style.animation === "none"
+      ? 0
+      : animActive;
 
   useEffect(() => {
-    if (style.animation === "none") return;
+    if (!full || words.length === 0 || synced || style.animation === "none") return;
     const ms =
       style.animation === "word_pop" ? 700 : style.animation === "karaoke" ? 450 : 1200;
     const id = setInterval(() => {
-      setActive((i) => (i + 1) % Math.max(words.length, 1));
+      setAnimActive((i) => (i + 1) % Math.max(words.length, 1));
       setTick((t) => t + 1);
     }, ms);
     return () => clearInterval(id);
-  }, [style.animation, words.length]);
+  }, [style.animation, words.length, synced, full, styleKey]);
+
+  if (!full || words.length === 0) return null;
 
   if (style.animation === "word_pop") {
     const word = words[active % words.length] ?? words[0] ?? "";
     return (
       <p
-        key={`${tick}-${word}`}
+        key={`${styleKey}-${synced ? active : tick}-${word}`}
         className="caption-anim-word-pop w-full text-center leading-none"
         style={captionTextStyle(style, scale)}
+        dir={languageDir(language)}
       >
         <span style={{ color: style.highlightColor }}>{word}</span>
       </p>
     );
   }
 
+  const activeWord = active % Math.max(words.length, 1);
+
   return (
     <p
-      key={style.animation === "pop" || style.animation === "fade" ? tick : "static"}
+      key={
+        // Remount on each word so pop/fade CSS runs in sync with speech.
+        synced
+          ? `sync-${styleKey}-${full}-${activeWord}`
+          : style.animation === "pop" || style.animation === "fade"
+            ? `${styleKey}-${tick}`
+            : styleKey
+      }
       className={cn(
         "w-full text-center leading-[1.15]",
-        style.animation === "fade" && "caption-anim-fade",
-        style.animation === "pop" && "caption-anim-pop",
+        style.animation === "fade" && (!synced || playing) && "caption-anim-fade",
+        style.animation === "pop" && (!synced || playing) && "caption-anim-pop",
       )}
       style={captionTextStyle(style, scale)}
+      dir={languageDir(language)}
     >
       {words.map((word, i) => {
+        // karaoke: colors accumulate; pop: only the spoken word lights up
         const highlighted =
-          style.animation === "karaoke" ? i === active % words.length : i === 0;
+          style.animation === "karaoke"
+            ? i <= activeWord
+            : style.animation === "none"
+              ? false
+              : i === activeWord;
+        const isActive = i === activeWord;
         return (
           <span key={`${word}-${i}`}>
             {i > 0 ? " " : null}
             <span
+              className={cn(
+                isActive && style.animation === "pop" && playing && "caption-anim-word-pop",
+              )}
               style={{
                 color: highlighted ? style.highlightColor : style.textColor,
-                transition: "color 120ms ease",
+                display: "inline-block",
+                transition: "color 80ms ease",
               }}
             >
               {word}

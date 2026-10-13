@@ -47,7 +47,24 @@ export async function GET(_request: Request, { params }: Params) {
       signedUrl = data?.signedUrl ?? null;
     }
 
-    return jsonOk({ clip, signedUrl, presets: CAPTION_PRESETS });
+    const pad = 1.5;
+    const { data: transcript } = await supabase
+      .from("transcript_segments")
+      .select("start_time,end_time,text,language")
+      .eq("project_id", clip.project_id)
+      .gte("end_time", Number(clip.start_time) - pad)
+      .lte("start_time", Number(clip.end_time) + pad)
+      .order("start_time", { ascending: true });
+
+    // Preview applies the same caption language transform client-side
+    // (src/lib/captions/transform.ts); export uses worker/pipeline/translate.py.
+
+    return jsonOk({
+      clip,
+      signedUrl,
+      presets: CAPTION_PRESETS,
+      transcript: transcript ?? [],
+    });
   } catch (err) {
     return handleRouteError(err);
   }
@@ -68,19 +85,6 @@ export async function PATCH(request: Request, { params }: Params) {
       .maybeSingle();
     if (!existing) return jsonError("Clip not found", 404);
 
-    const cheapOnly =
-      !body.reRender &&
-      body.startTime === undefined &&
-      body.endTime === undefined &&
-      body.outputFormat === undefined &&
-      body.quality === undefined &&
-      body.cropSettings === undefined &&
-      body.burnCaptions === undefined &&
-      body.captionPreset === undefined &&
-      body.captionLanguage === undefined &&
-      body.captionSettings === undefined &&
-      body.captionText === undefined;
-
     const updates: Record<string, unknown> = {};
     if (body.title !== undefined) updates.title = body.title;
     if (body.startTime !== undefined) updates.start_time = body.startTime;
@@ -97,20 +101,11 @@ export async function PATCH(request: Request, { params }: Params) {
       updates.resolution = resolutionFor(body.outputFormat as AspectRatio);
     }
 
-    const needsRender =
-      Boolean(body.reRender) ||
-      body.startTime !== undefined ||
-      body.endTime !== undefined ||
-      body.outputFormat !== undefined ||
-      body.quality !== undefined ||
-      body.cropSettings !== undefined ||
-      body.burnCaptions !== undefined ||
-      body.captionPreset !== undefined ||
-      body.captionLanguage !== undefined ||
-      body.captionSettings !== undefined ||
-      body.captionText !== undefined;
+    // Caption style can be saved without re-render (live CSS preview).
+    // Only queue a job when the client explicitly asks (reRender: true).
+    const needsRender = Boolean(body.reRender);
 
-    if (needsRender && !cheapOnly) {
+    if (needsRender) {
       updates.render_status = "pending";
     }
 
@@ -150,6 +145,7 @@ export async function PATCH(request: Request, { params }: Params) {
             end_time: clip.end_time,
             aspect_ratio: clip.output_format,
             caption_preset: clip.caption_preset,
+            caption_settings: clip.caption_settings ?? {},
             language: clip.caption_language,
             caption_text: clip.caption_text,
             burn_captions: clip.burn_captions,

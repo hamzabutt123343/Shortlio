@@ -80,8 +80,16 @@ class JobRepository:
         progress_pct: float | None = None,
         partial_result: dict[str, Any] | None = None,
     ) -> None:
+        stage_value = (
+            progress_stage.value
+            if isinstance(progress_stage, ProgressStage)
+            else str(progress_stage)
+        )
+        # Python 3.11+ str(Enum) can return "ProgressStage.NAME"; always store the value.
+        if stage_value.startswith("ProgressStage."):
+            stage_value = stage_value.split(".", 1)[-1].lower()
         payload: dict[str, Any] = {
-            "progress_stage": str(progress_stage),
+            "progress_stage": stage_value,
             "updated_at": _now_iso(),
         }
         if progress_pct is not None:
@@ -250,6 +258,9 @@ class JobRepository:
         storage_path: str,
         duration: float | None,
         reframe_warning: bool,
+        caption_settings: dict[str, Any] | None = None,
+        burn_captions: bool | None = None,
+        crop_settings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = _now_iso()
         row: dict[str, Any] = {
@@ -272,6 +283,12 @@ class JobRepository:
             "error_message": None,
             "updated_at": now,
         }
+        if caption_settings is not None:
+            row["caption_settings"] = caption_settings
+        if burn_captions is not None:
+            row["burn_captions"] = bool(burn_captions)
+        if crop_settings is not None:
+            row["crop_settings"] = crop_settings
         if clip_id:
             self.client.table("clips").update(row).eq("id", clip_id).execute()
             out = self.get_clip(clip_id)

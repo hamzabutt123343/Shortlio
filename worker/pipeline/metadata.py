@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Any
 
-from config import Settings, get_settings, run_subprocess, validate_public_http_url
+from config import Settings, get_settings, run_subprocess, validate_public_http_url, ytdlp_base_args
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ def fetch_ytdlp_metadata(url: str, settings: Settings | None = None) -> dict[str
     except ValueError:
         return None
     cmd = [
-        "yt-dlp",
+        *ytdlp_base_args(settings),
         "--dump-single-json",
         "--skip-download",
         url,

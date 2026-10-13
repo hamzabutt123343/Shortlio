@@ -30,6 +30,15 @@ export default async function ClipPage({ params }: Props) {
     signedUrl = data?.signedUrl ?? null;
   }
 
+  const pad = 1.5;
+  const { data: transcript } = await supabase
+    .from("transcript_segments")
+    .select("start_time,end_time,text,language")
+    .eq("project_id", clip.project_id)
+    .gte("end_time", Number(clip.start_time) - pad)
+    .lte("start_time", Number(clip.end_time) + pad)
+    .order("start_time", { ascending: true });
+
   return (
     <AppShell
       planLabel={usage.plan === "pro" ? "Pro" : "Free"}
@@ -40,7 +49,11 @@ export default async function ClipPage({ params }: Props) {
       }
     >
       <div className="mx-auto max-w-6xl">
-        <ClipEditor initialClip={clip} initialSignedUrl={signedUrl} />
+        <ClipEditor
+          initialClip={clip}
+          initialSignedUrl={signedUrl}
+          initialTranscript={transcript ?? []}
+        />
       </div>
     </AppShell>
   );

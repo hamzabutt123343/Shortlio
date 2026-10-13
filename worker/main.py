@@ -99,6 +99,7 @@ def _load_or_build_transcript(
     current_stage: str,
     check_cancel,
     settings,
+    language_hint: str = "en",
 ) -> list[TranscriptSegment]:
     segments = load_cached_transcript(work_dir)
     from_db = False
@@ -120,7 +121,20 @@ def _load_or_build_transcript(
         repo.update_progress(
             job_id, progress_stage=ProgressStage.TRANSCRIBING_AUDIO, progress_pct=10
         )
-        segments = ensure_transcript(job_id=job_id, source_url=source_url, settings=settings)
+
+        def _transcript_progress(pct: float, stage: str) -> None:
+            try:
+                repo.update_progress(job_id, progress_stage=stage, progress_pct=pct)
+            except Exception:
+                pass
+
+        segments = ensure_transcript(
+            job_id=job_id,
+            source_url=source_url,
+            settings=settings,
+            on_progress=_transcript_progress,
+            language_hint=language_hint,
+        )
         if project_id:
             _persist_transcript(
                 repo,
@@ -189,6 +203,9 @@ def _render_and_upload_clips(
     settings,
     check_cancel,
     confirm_quota: bool,
+    caption_settings: dict[str, Any] | None = None,
+    burn_captions: bool = True,
+    crop_settings: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     repo.update_progress(job_id, progress_stage=ProgressStage.FETCHING_SELECTED_SEGMENTS, progress_pct=45)
     segment_paths: list[Path] = []
@@ -231,6 +248,9 @@ def _render_and_upload_clips(
             aspect=aspect,
             caption_preset=caption_preset,
             language_hint=language_hint,
+            caption_settings=caption_settings,
+            burn_captions=burn_captions,
+            crop_settings=crop_settings,
             quality=quality,
             settings=settings,
         )
@@ -260,6 +280,9 @@ def _render_and_upload_clips(
                 storage_path=str(meta["path"]),
                 duration=max(0.0, moment.end - moment.start),
                 reframe_warning=bool(plan.used_center_fallback),
+                caption_settings=caption_settings or {},
+                burn_captions=burn_captions,
+                crop_settings=crop_settings,
             )
             if confirm_quota and clip_row and clip_row.get("id"):
                 repo.confirm_clip_success(user_id, str(clip_row["id"]), job_id)
@@ -323,7 +346,10 @@ def _process_full_pipeline(
     aspect = str(payload.get("aspect_ratio", "9:16"))
     caption_preset = str(payload.get("caption_preset", "classic_white"))
     language_hint = str(payload.get("language", "en"))
-    quality = str(payload.get("quality", "balanced"))
+    quality = str(payload.get("quality", "draft"))
+    caption_settings = payload.get("caption_settings") if isinstance(payload.get("caption_settings"), dict) else None
+    burn_captions = bool(payload.get("burn_captions", True))
+    crop_settings = payload.get("crop_settings") if isinstance(payload.get("crop_settings"), dict) else None
     cleanup = bool(payload.get("cleanup_temp", True))
 
     current_stage = job.get("progress_stage") or ProgressStage.FETCHING_TRANSCRIPT.value
@@ -347,6 +373,7 @@ def _process_full_pipeline(
             current_stage=current_stage,
             check_cancel=check_cancel,
             settings=settings,
+            language_hint=language_hint,
         )
         if not segments:
             return
@@ -429,6 +456,9 @@ def _process_full_pipeline(
             settings=settings,
             check_cancel=check_cancel,
             confirm_quota=True,
+            caption_settings=caption_settings,
+            burn_captions=burn_captions,
+            crop_settings=crop_settings,
         )
         if check_cancel() or not clips_out:
             return
@@ -480,7 +510,10 @@ def _process_render_selected(
     aspect = str(payload.get("aspect_ratio", "9:16"))
     caption_preset = str(payload.get("caption_preset", "classic_white"))
     language_hint = str(payload.get("language", "en"))
-    quality = str(payload.get("quality", "balanced"))
+    quality = str(payload.get("quality", "draft"))
+    caption_settings = payload.get("caption_settings") if isinstance(payload.get("caption_settings"), dict) else None
+    burn_captions = bool(payload.get("burn_captions", True))
+    crop_settings = payload.get("crop_settings") if isinstance(payload.get("crop_settings"), dict) else None
     cleanup = bool(payload.get("cleanup_temp", True))
     work_dir = settings.resolved_temp_dir() / job_id
 
@@ -499,7 +532,12 @@ def _process_render_selected(
         if not segments:
             segments = repo.fetch_transcript_segments(project_id)
         if not segments:
-            segments = ensure_transcript(job_id=job_id, source_url=source_url, settings=settings)
+            segments = ensure_transcript(
+                job_id=job_id,
+                source_url=source_url,
+                settings=settings,
+                language_hint=language_hint,
+            )
             _persist_transcript(
                 repo,
                 project_id=project_id,
@@ -524,6 +562,9 @@ def _process_render_selected(
             settings=settings,
             check_cancel=check_cancel,
             confirm_quota=True,
+            caption_settings=caption_settings,
+            burn_captions=burn_captions,
+            crop_settings=crop_settings,
         )
         if check_cancel() or not clips_out:
             return
@@ -572,7 +613,10 @@ def _process_re_render(
     aspect = str(payload.get("aspect_ratio", "9:16"))
     caption_preset = str(payload.get("caption_preset", "classic_white"))
     language_hint = str(payload.get("language", "en"))
-    quality = str(payload.get("quality", "balanced"))
+    quality = str(payload.get("quality", "draft"))
+    caption_settings = payload.get("caption_settings") if isinstance(payload.get("caption_settings"), dict) else None
+    burn_captions = bool(payload.get("burn_captions", True))
+    crop_settings = payload.get("crop_settings") if isinstance(payload.get("crop_settings"), dict) else None
     cleanup = bool(payload.get("cleanup_temp", True))
     work_dir = settings.resolved_temp_dir() / job_id
 
@@ -580,6 +624,14 @@ def _process_re_render(
     if not clip_row:
         repo.mark_failed(job, f"Clip not found: {clip_id}")
         return
+
+    # Prefer DB clip settings when payload omits them
+    if caption_settings is None and isinstance(clip_row.get("caption_settings"), dict):
+        caption_settings = clip_row["caption_settings"]
+    if crop_settings is None and isinstance(clip_row.get("crop_settings"), dict):
+        crop_settings = clip_row["crop_settings"]
+    if "burn_captions" not in payload and clip_row.get("burn_captions") is not None:
+        burn_captions = bool(clip_row["burn_captions"])
 
     start = float(payload.get("start_time", clip_row.get("start_time", 0)))
     end = float(payload.get("end_time", clip_row.get("end_time", start + 30)))
@@ -608,7 +660,12 @@ def _process_re_render(
         if not segments and project_id:
             segments = repo.fetch_transcript_segments(project_id)
         if not segments:
-            segments = ensure_transcript(job_id=job_id, source_url=source_url, settings=settings)
+            segments = ensure_transcript(
+                job_id=job_id,
+                source_url=source_url,
+                settings=settings,
+                language_hint=language_hint,
+            )
 
         clips_out = _render_and_upload_clips(
             repo,
@@ -626,6 +683,9 @@ def _process_re_render(
             settings=settings,
             check_cancel=check_cancel,
             confirm_quota=False,
+            caption_settings=caption_settings,
+            burn_captions=burn_captions,
+            crop_settings=crop_settings,
         )
         if check_cancel() or not clips_out:
             return

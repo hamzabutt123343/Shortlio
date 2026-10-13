@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import { CAPTION_PRESETS, getCaptionPreset } from "@/lib/captions/presets";
 
 describe("caption presets", () => {
-  it("defines eight distinct rendering presets", () => {
-    expect(CAPTION_PRESETS).toHaveLength(8);
+  it("defines eleven distinct rendering presets", () => {
+    expect(CAPTION_PRESETS).toHaveLength(11);
     const ids = new Set(CAPTION_PRESETS.map((p) => p.id));
-    expect(ids.size).toBe(8);
+    expect(ids.size).toBe(11);
   });
 
   it("falls back to classic white", () => {

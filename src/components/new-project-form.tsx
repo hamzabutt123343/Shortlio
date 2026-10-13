@@ -4,17 +4,17 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 import { CaptionStylePicker } from "@/components/caption-style-picker";
 import { Button, Card, Input, Label } from "@/components/ui";
-import type { CaptionSettings } from "@/lib/captions/style";
+import { settingsForPresetMode, type CaptionSettings } from "@/lib/captions/style";
 import { CLIP_COUNT_OPTIONS, type UsageInfo } from "@/lib/types";
 
 export function NewProjectForm({ usage }: { usage: UsageInfo }) {
   const router = useRouter();
   const [url, setUrl] = useState("");
-  const [clipCount, setClipCount] = useState(3);
+  const [clipCount, setClipCount] = useState(1);
   const [aspectRatio, setAspectRatio] = useState<"9:16" | "1:1" | "16:9">("9:16");
   const [captionPreset, setCaptionPreset] = useState("classic_white");
   const [captionLanguage, setCaptionLanguage] = useState("en");
-  const [captionSettings, setCaptionSettings] = useState<CaptionSettings>({});
+  const [captionSettings, setCaptionSettings] = useState<CaptionSettings>(settingsForPresetMode);
   const [platformPreset, setPlatformPreset] = useState("youtube_shorts");
   const [error, setError] = useState<string | null>(null);
   const [workerNote, setWorkerNote] = useState<string | null>(null);
@@ -87,7 +87,7 @@ export function NewProjectForm({ usage }: { usage: UsageInfo }) {
             >
               {CLIP_COUNT_OPTIONS.map((n) => (
                 <option key={n} value={n} disabled={usage.plan === "free" && (usage.remaining ?? 0) < n}>
-                  {n} clips
+                  {n} {n === 1 ? "clip" : "clips"}
                 </option>
               ))}
             </select>

@@ -18,7 +18,7 @@ const createSchema = z.object({
   platformPreset: z
     .enum(["youtube_shorts", "tiktok", "instagram_reels", "custom"])
     .default("youtube_shorts"),
-  quality: z.enum(["draft", "balanced", "high"]).default("balanced"),
+  quality: z.enum(["draft", "balanced", "high"]).default("draft"),
 });
 
 export async function GET() {
@@ -88,6 +88,12 @@ export async function POST(request: Request) {
       language: body.captionLanguage,
       platform_preset: body.platformPreset,
       quality: body.quality,
+      crop_settings: {
+        focal_x: 0.5,
+        mode: "auto",
+        speaker_focus: true,
+        tracking_mode: "hard_cut",
+      },
     };
 
     const { data: job, error: jobError } = await admin
