@@ -32,6 +32,11 @@ export function SiteFooter() {
                 Pricing
               </Link>
             </li>
+            <li>
+              <Link href="/download" className="hover:text-[var(--text)]">
+                Download for Windows
+              </Link>
+            </li>
           </ul>
         </div>
         <div>

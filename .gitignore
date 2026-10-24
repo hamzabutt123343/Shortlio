@@ -1,7 +1,7 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
-/node_modules
+node_modules/
 /.pnp
 .pnp.*
 .yarn/*
@@ -34,6 +34,10 @@ yarn-error.log*
 .env*
 !.env.example
 !worker/.env.example
+!desktop/.env.example
+
+# desktop Electron build output
+desktop/dist/
 
 # worker
 worker/.venv/

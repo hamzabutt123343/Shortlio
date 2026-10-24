@@ -1,0 +1,78 @@
+name: Desktop Windows release
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/desktop-v* ]]; then
+            VER="${GITHUB_REF#refs/tags/desktop-v}"
+          else
+            VER="$(node -p "require('./package.json').version")"
+          fi
+          echo "DESKTOP_VERSION=${VER}" >> "$GITHUB_ENV"
+          npm version "$VER" --no-git-tag-version --allow-same-version
+
+      - name: Bake production app URL into app-config.json
+        shell: bash
+        env:
+          SHORTLIO_APP_URL: ${{ vars.SHORTLIO_APP_URL }}
+        run: |
+          if [ -z "${SHORTLIO_APP_URL:-}" ]; then
+            URL="http://localhost:3000"
+            echo "::warning::Repository variable SHORTLIO_APP_URL is not set; packaging localhost default."
+          else
+            URL="$SHORTLIO_APP_URL"
+          fi
+          node -e "const fs=require('fs'); fs.writeFileSync('app-config.json', JSON.stringify({ appUrl: process.argv[1] }, null, 2) + '\n');" "$URL"
+          echo "Packaged appUrl=${URL}"
+
+      - name: Build Windows installer + portable
+        run: npm run dist:win
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: shortlio-windows-${{ env.DESKTOP_VERSION }}
+          path: desktop/dist/*.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: desktop/dist/*.exe
+          generate_release_notes: true
+          name: Shortlio Desktop ${{ env.DESKTOP_VERSION }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

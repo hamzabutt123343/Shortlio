@@ -1,0 +1,29 @@
+appId: com.shortlio.app
+productName: Shortlio
+copyright: Copyright © Shortlio
+directories:
+  output: dist
+  buildResources: assets
+files:
+  - src/**/*
+  - app-config.json
+  - package.json
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  artifactName: Shortlio-${version}-${os}-${arch}.${ext}
+  # Optional: drop icon.ico / icon.png in assets/ for branded installer
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Shortlio
+portable:
+  artifactName: Shortlio-${version}-portable.${ext}
+publish: null

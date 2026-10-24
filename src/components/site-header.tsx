@@ -9,6 +9,7 @@ const NAV = [
   { href: "/#features", label: "Features" },
   { href: "/#how", label: "How It Works" },
   { href: "/pricing", label: "Pricing" },
+  { href: "/download", label: "Download" },
 ];
 
 export function SiteHeader({ authed = false }: { authed?: boolean }) {

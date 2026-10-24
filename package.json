@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "desktop:dev": "npm run dev --prefix desktop",
+    "desktop:dist": "npm run dist:win --prefix desktop"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",

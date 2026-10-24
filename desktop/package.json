@@ -1,0 +1,20 @@
+{
+  "name": "shortlio-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shortlio Windows desktop shell — loads the hosted web app",
+  "main": "src/main.js",
+  "author": "Shortlio",
+  "license": "UNLICENSED",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "dist:win": "electron-builder --win --x64",
+    "pack": "electron-builder --win --x64 --dir"
+  },
+  "devDependencies": {
+    "electron": "^35.1.2",
+    "electron-builder": "^26.0.12"
+  }
+}
+

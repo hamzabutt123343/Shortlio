@@ -123,9 +123,9 @@ export default async function HomePage() {
               <Link href={ctaHref}>
                 <Button className="min-w-[150px] px-6 py-3">{user ? "Open dashboard" : "Get Started"}</Button>
               </Link>
-              <Link href="/pricing">
+              <Link href="/download">
                 <Button variant="secondary" className="px-6 py-3">
-                  View pricing
+                  Download for Windows
                 </Button>
               </Link>
             </div>
