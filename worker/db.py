@@ -25,6 +25,20 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _is_missing_viral_metadata_column(exc: BaseException) -> bool:
+    """True when PostgREST/Postgres reports clips.viral_metadata is absent."""
+    text = str(exc).lower()
+    if "viral_metadata" not in text:
+        return False
+    return (
+        "pgrst204" in text
+        or "42703" in text
+        or "does not exist" in text
+        or "schema cache" in text
+        or "could not find" in text
+    )
+
+
 class JobRepository:
     def __init__(self, client: Client | None = None, settings: Settings | None = None):
         self.settings = settings or get_settings()
@@ -152,6 +166,19 @@ class JobRepository:
         payload["updated_at"] = _now_iso()
         self.client.table("projects").update(payload).eq("id", project_id).execute()
 
+    def get_project(self, project_id: str) -> dict[str, Any] | None:
+        resp = (
+            self.client.table("projects")
+            .select("id,source_title,source_metadata,source_url")
+            .eq("id", project_id)
+            .limit(1)
+            .execute()
+        )
+        data = resp.data
+        if isinstance(data, list) and data:
+            return data[0]
+        return None
+
     def replace_clip_candidates(
         self,
         project_id: str,
@@ -261,6 +288,7 @@ class JobRepository:
         caption_settings: dict[str, Any] | None = None,
         burn_captions: bool | None = None,
         crop_settings: dict[str, Any] | None = None,
+        viral_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = _now_iso()
         row: dict[str, Any] = {
@@ -289,6 +317,23 @@ class JobRepository:
             row["burn_captions"] = bool(burn_captions)
         if crop_settings is not None:
             row["crop_settings"] = crop_settings
+        if viral_metadata is not None:
+            row["viral_metadata"] = viral_metadata
+        try:
+            return self._write_rendered_clip(clip_id, row)
+        except Exception as exc:
+            if viral_metadata is None or not _is_missing_viral_metadata_column(exc):
+                raise
+            logger.warning(
+                "clips.viral_metadata missing — saving clip without metadata. "
+                "Run supabase/migrations/20260320000001_viral_metadata.sql"
+            )
+            row.pop("viral_metadata", None)
+            return self._write_rendered_clip(clip_id, row)
+
+    def _write_rendered_clip(
+        self, clip_id: str | None, row: dict[str, Any]
+    ) -> dict[str, Any]:
         if clip_id:
             self.client.table("clips").update(row).eq("id", clip_id).execute()
             out = self.get_clip(clip_id)

@@ -70,6 +70,36 @@ class FramingSegment:
 
 
 @dataclass
+class SplitPane:
+    """One panel crop from the source (stacked or side-by-side in the output)."""
+
+    crop_x: int
+    crop_y: int
+    crop_w: int
+    crop_h: int
+    role: str = "top"  # "top" | "bottom" | "left" | "right"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "crop_x": self.crop_x,
+            "crop_y": self.crop_y,
+            "crop_w": self.crop_w,
+            "crop_h": self.crop_h,
+            "role": self.role,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SplitPane:
+        return cls(
+            crop_x=int(data["crop_x"]),
+            crop_y=int(data["crop_y"]),
+            crop_w=int(data["crop_w"]),
+            crop_h=int(data["crop_h"]),
+            role=str(data.get("role") or "top"),
+        )
+
+
+@dataclass
 class ReframePlan:
     crop_x: int
     crop_y: int
@@ -82,6 +112,14 @@ class ReframePlan:
     detector: str = "haar"
     focal_x: float | None = None
     switch_style: str = "hard_cut"
+    # single = classic crop; split_stack = two speakers up/down;
+    # reaction_stack = reactor + reacted-to content.
+    layout: str = "single"
+    panes: list[SplitPane] = field(default_factory=list)
+    # Dual-layout composition (ignored for layout=single).
+    stack_direction: str = "top_bottom"  # top_bottom | bottom_top | side_by_side
+    panel_ratio: float = 0.5  # primary (reactor) panel share of the canvas
+    fit_mode: str = "contain"  # contain (+ blur) | cover (fill + crop)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -96,6 +134,11 @@ class ReframePlan:
             "detector": self.detector,
             "focal_x": self.focal_x,
             "switch_style": self.switch_style,
+            "layout": self.layout,
+            "panes": [p.to_dict() for p in self.panes],
+            "stack_direction": self.stack_direction,
+            "panel_ratio": self.panel_ratio,
+            "fit_mode": self.fit_mode,
         }
 
     @classmethod
@@ -105,6 +148,7 @@ class ReframePlan:
             for k in (data.get("keyframes") or [])
         ]
         segs = [FramingSegment.from_dict(s) for s in (data.get("segments") or [])]
+        panes = [SplitPane.from_dict(p) for p in (data.get("panes") or [])]
         return cls(
             crop_x=int(data["crop_x"]),
             crop_y=int(data["crop_y"]),
@@ -117,6 +161,11 @@ class ReframePlan:
             detector=str(data.get("detector") or "haar"),
             focal_x=float(data["focal_x"]) if data.get("focal_x") is not None else None,
             switch_style=str(data.get("switch_style") or "hard_cut"),
+            layout=str(data.get("layout") or "single"),
+            panes=panes,
+            stack_direction=str(data.get("stack_direction") or "top_bottom"),
+            panel_ratio=float(data.get("panel_ratio") or 0.5),
+            fit_mode=str(data.get("fit_mode") or "contain"),
         )
 
 
@@ -442,20 +491,660 @@ def tracking_cache_path(
     *,
     speaker_focus: bool = True,
     switch_style: str = "hard_cut",
+    layout: str = "single",
+    stack_direction: str = "top_bottom",
+    panel_ratio: float = 0.5,
+    fit_mode: str = "contain",
 ) -> Path:
+    layout_key = (layout or "single").lower().strip()
+    stack_key = (stack_direction or "top_bottom").lower().strip()
+    fit_key = (fit_mode or "contain").lower().strip()
+    pr = round(float(panel_ratio or 0.5), 3)
     try:
         st = video_path.stat()
         identity = (
             f"{video_path.resolve()}|{st.st_size}|{st.st_mtime_ns}|{aspect}|"
-            f"{focal_x}|{manual}|speaker_focus={speaker_focus}|{switch_style}|hardcut_v2"
+            f"{focal_x}|{manual}|speaker_focus={speaker_focus}|{switch_style}|"
+            f"layout={layout_key}|stack={stack_key}|pr={pr}|fit={fit_key}|reaction_v4"
         )
     except OSError:
         identity = (
             f"{video_path}|{aspect}|{focal_x}|{manual}|"
-            f"speaker_focus={speaker_focus}|{switch_style}|hardcut_v2"
+            f"speaker_focus={speaker_focus}|{switch_style}|layout={layout_key}|"
+            f"stack={stack_key}|pr={pr}|fit={fit_key}|reaction_v4"
         )
     digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:20]
     return cache_root / f"track_{digest}.json"
+
+
+def _pane_crop_around(
+    cx: float,
+    cy: float,
+    frame_w: int,
+    frame_h: int,
+    *,
+    face_w: float = 0.0,
+    face_h: float = 0.0,
+    tightness: float = 1.0,
+) -> tuple[int, int, int, int]:
+    """Crop a ~9:8 window (half of 9:16) centered on a subject.
+
+    ``tightness`` > 1 zooms in more on the face (used for reaction top pane).
+    """
+    # Each vertical half of 9:16 is 9:8.
+    pane_ratio = 9 / 8
+    crop_w, crop_h = _crop_dims(frame_w, frame_h, pane_ratio)
+    t = max(0.6, float(tightness))
+    # Prefer a tighter crop around the face when we know its size.
+    if face_w > 0 and face_h > 0:
+        base_frac = 0.55 / t
+        face_mult = 3.2 / t
+        tight_w = int(min(frame_w, max(crop_w * base_frac, face_w * face_mult)))
+        tight_h = int(tight_w / pane_ratio)
+        if tight_h <= frame_h and tight_w >= 64:
+            crop_w, crop_h = tight_w, tight_h
+    # Bias slightly up so heads aren't cropped.
+    cy = max(0.0, cy - face_h * 0.15)
+    x, y = _clamp_crop(cx, cy, crop_w, crop_h, frame_w, frame_h)
+    return x, y, crop_w, crop_h
+
+
+def _rect_overlap_area(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    return max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+
+
+def _point_in_zone(cx: float, cy: float, zone: tuple[int, int, int, int]) -> bool:
+    zx, zy, zw, zh = zone
+    return zx <= cx < zx + zw and zy <= cy < zy + zh
+
+
+def _reaction_source_zones(
+    reactor: tuple[float, float, float, float],
+    frame_w: int,
+    frame_h: int,
+) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+    """Split the source into non-overlapping (reactor_zone, content_zone).
+
+    Reaction videos are one file with two logical sources (creator + original).
+    Zones never overlap so crop coordinates cannot be reused across panels.
+    """
+    rcx, rcy, rw, rh = reactor
+    h_bias = abs(rcx / max(frame_w, 1) - 0.5)
+    v_bias = abs(rcy / max(frame_h, 1) - 0.5)
+
+    # Side-by-side (most common): vertical divider.
+    if h_bias >= v_bias * 0.7 or h_bias > 0.1:
+        gap = max(8, int(max(rw, 1) * 0.15))
+        if rcx >= frame_w * 0.5:
+            # Creator on right → original content on left.
+            split = int(max(frame_w * 0.22, min(frame_w * 0.78, rcx - rw * 0.7)))
+            split = max(gap, min(frame_w - gap, split))
+            content_r = max(1, split - gap // 2)
+            reactor_x = min(frame_w - 1, split + gap // 2)
+            content_zone = (0, 0, content_r, frame_h)
+            reactor_zone = (reactor_x, 0, max(1, frame_w - reactor_x), frame_h)
+        else:
+            # Creator on left → original content on right.
+            split = int(max(frame_w * 0.22, min(frame_w * 0.78, rcx + rw * 0.7)))
+            split = max(gap, min(frame_w - gap, split))
+            reactor_r = max(1, split - gap // 2)
+            content_x = min(frame_w - 1, split + gap // 2)
+            reactor_zone = (0, 0, reactor_r, frame_h)
+            content_zone = (content_x, 0, max(1, frame_w - content_x), frame_h)
+        return reactor_zone, content_zone
+
+    # Stacked in source: horizontal divider.
+    gap = max(8, int(max(rh, 1) * 0.15))
+    if rcy < frame_h * 0.5:
+        split = int(max(frame_h * 0.22, min(frame_h * 0.78, rcy + rh * 0.75)))
+        split = max(gap, min(frame_h - gap, split))
+        reactor_zone = (0, 0, frame_w, max(1, split - gap // 2))
+        y0 = min(frame_h - 1, split + gap // 2)
+        content_zone = (0, y0, frame_w, max(1, frame_h - y0))
+    else:
+        split = int(max(frame_h * 0.22, min(frame_h * 0.78, rcy - rh * 0.75)))
+        split = max(gap, min(frame_h - gap, split))
+        content_zone = (0, 0, frame_w, max(1, split - gap // 2))
+        y0 = min(frame_h - 1, split + gap // 2)
+        reactor_zone = (0, y0, frame_w, max(1, frame_h - y0))
+    return reactor_zone, content_zone
+
+
+def _even_dim(n: int) -> int:
+    return max(2, int(n) // 2 * 2)
+
+
+def _panel_pixel_sizes(
+    out_w: int,
+    out_h: int,
+    stack_direction: str,
+    panel_ratio: float,
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Return ((primary_w, primary_h), (secondary_w, secondary_h))."""
+    pr = max(0.25, min(0.75, float(panel_ratio or 0.5)))
+    direction = (stack_direction or "top_bottom").lower().strip()
+    if direction == "side_by_side":
+        primary_w = _even_dim(int(out_w * pr))
+        secondary_w = max(2, out_w - primary_w)
+        if secondary_w % 2:
+            primary_w -= 1
+            secondary_w += 1
+        return (primary_w, out_h), (secondary_w, out_h)
+    primary_h = _even_dim(int(out_h * pr))
+    secondary_h = max(2, out_h - primary_h)
+    if secondary_h % 2:
+        primary_h -= 1
+        secondary_h += 1
+    return (out_w, primary_h), (out_w, secondary_h)
+
+
+def _panel_aspect_ratio(
+    output_aspect: float,
+    stack_direction: str,
+    panel_ratio: float,
+    *,
+    primary: bool,
+) -> float:
+    """Width/height of one output panel derived from the canvas aspect."""
+    pr = max(0.25, min(0.75, float(panel_ratio or 0.5)))
+    share = pr if primary else (1.0 - pr)
+    direction = (stack_direction or "top_bottom").lower().strip()
+    if direction == "side_by_side":
+        return output_aspect * share
+    return output_aspect / max(share, 0.01)
+
+
+def _loose_zone_crop(
+    subject: tuple[float, float, float, float],
+    zone: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    """Nearly-full zone crop biased toward the subject — never cuts the zone short.
+
+    Used with contain+blur so faces stay fully visible inside the panel.
+    """
+    zx, zy, zw, zh = zone
+    if zw < 32 or zh < 32:
+        return zx, zy, max(1, zw), max(1, zh)
+    # Prefer the full zone so we don't invent empty margins or chop people.
+    # Mild subject bias only when the zone is very wide relative to the face.
+    cx, cy, fw, fh = subject
+    if fw > 0 and zw > fw * 6:
+        crop_w = max(int(fw * 4.5), int(zw * 0.72))
+        crop_w = min(zw, max(64, crop_w))
+        crop_h = zh
+        x = int(max(zx, min(zx + zw - crop_w, cx - crop_w / 2)))
+        return x, zy, crop_w, crop_h
+    return zx, zy, zw, zh
+
+
+def _cover_crop_in_zone(
+    subject: tuple[float, float, float, float],
+    zone: tuple[int, int, int, int],
+    pane_ratio: float,
+) -> tuple[int, int, int, int]:
+    """Crop inside ``zone`` to ``pane_ratio``, centered on subject (fill mode)."""
+    zx, zy, zw, zh = zone
+    if zw < 32 or zh < 32:
+        return zx, zy, max(1, zw), max(1, zh)
+    crop_w, crop_h = _crop_dims(zw, zh, max(pane_ratio, 0.05))
+    cx, cy, fw, fh = subject
+    # Generous framing — avoid extreme face zoom that chops heads/shoulders.
+    if fw > 0 and fh > 0:
+        min_w = int(min(zw, max(fw * 3.8, crop_w * 0.7)))
+        min_h = int(min_w / max(pane_ratio, 0.05))
+        if min_h <= zh and min_w >= 64:
+            # Expand toward full cover crop, never tighter than min around face.
+            crop_w = max(min_w, crop_w)
+            crop_h = int(crop_w / max(pane_ratio, 0.05))
+            if crop_h > zh:
+                crop_h = zh
+                crop_w = int(crop_h * pane_ratio)
+                crop_w = min(crop_w, zw)
+    cy = max(float(zy), min(float(zy + zh), cy - max(fh, 0.0) * 0.2))
+    x = int(max(zx, min(zx + zw - crop_w, cx - crop_w / 2)))
+    y = int(max(zy, min(zy + zh - crop_h, cy - crop_h / 2)))
+    return x, y, max(1, crop_w), max(1, crop_h)
+
+
+def _pane_crop_in_zone(
+    subject: tuple[float, float, float, float],
+    zone: tuple[int, int, int, int],
+    *,
+    tightness: float = 1.0,
+    pane_ratio: float = 9 / 8,
+    fit_mode: str = "contain",
+) -> tuple[int, int, int, int]:
+    """Crop inside ``zone`` for a dual panel. Default contain keeps subjects whole."""
+    _ = tightness
+    mode = (fit_mode or "contain").lower().strip()
+    if mode == "cover":
+        return _cover_crop_in_zone(subject, zone, pane_ratio)
+    return _loose_zone_crop(subject, zone)
+
+
+def _zone_center_subject(
+    zone: tuple[int, int, int, int],
+) -> tuple[float, float, float, float]:
+    zx, zy, zw, zh = zone
+    return (
+        zx + zw * 0.5,
+        zy + zh * 0.42,
+        max(zw * 0.3, 32.0),
+        max(zh * 0.3, 32.0),
+    )
+
+
+def _pick_subject_in_zone(
+    faces: list[tuple[float, float, float, float]],
+    zone: tuple[int, int, int, int],
+) -> tuple[float, float, float, float]:
+    """Largest face whose center lies in ``zone``; else zone center fallback."""
+    in_zone = [f for f in faces if _point_in_zone(f[0], f[1], zone)]
+    if not in_zone:
+        return _zone_center_subject(zone)
+    return max(in_zone, key=lambda f: f[2] * f[3])
+
+
+def _detect_faces_in_roi(
+    frame: np.ndarray,
+    zone: tuple[int, int, int, int],
+    mp_det,
+) -> list[tuple[float, float, float, float]]:
+    """Run face detection only inside ``zone``; return full-frame coordinates."""
+    zx, zy, zw, zh = zone
+    h, w = frame.shape[:2]
+    zx = max(0, min(w - 1, zx))
+    zy = max(0, min(h - 1, zy))
+    zw = max(1, min(w - zx, zw))
+    zh = max(1, min(h - zy, zh))
+    roi = frame[zy : zy + zh, zx : zx + zw]
+    if roi.size == 0:
+        return []
+    faces: list[tuple[float, float, float, float]] = []
+    if mp_det is not None:
+        faces = _detect_faces_mediapipe(roi, mp_det)
+    if not faces:
+        faces = _detect_faces_haar(roi)
+    # Map ROI-local centers back to full-frame coords.
+    return [(cx + zx, cy + zy, fw, fh) for cx, cy, fw, fh in faces]
+
+
+def _collect_zone_face_samples(
+    video_path: Path,
+    zone: tuple[int, int, int, int],
+    *,
+    model_cache_dir: Path | None = None,
+    sample_fps: float = 1.5,
+    max_samples: int = 24,
+) -> tuple[str, list[tuple[float, float, float, float]]]:
+    """Independent face samples for one logical source (reactor or content)."""
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video_path}")
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    step = max(1, int(fps / sample_fps))
+    cache_dir = model_cache_dir or (video_path.parent / ".models")
+    mp_det = _mediapipe_detector(cache_dir)
+    detector_name = "mediapipe" if mp_det is not None else "haar"
+
+    faces_all: list[tuple[float, float, float, float]] = []
+    idx = 0
+    samples = 0
+    while samples < max_samples:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if idx % step == 0:
+            faces_all.extend(_detect_faces_in_roi(frame, zone, mp_det))
+            samples += 1
+        idx += 1
+    cap.release()
+    return detector_name, faces_all
+
+
+def _reaction_content_crop(
+    reactor: tuple[float, float, float, float],
+    frame_w: int,
+    frame_h: int,
+    *,
+    content_hint: tuple[float, float, float, float] | None = None,
+) -> tuple[int, int, int, int]:
+    """Backward-compatible helper: content crop inside the content zone only."""
+    _reactor_zone, content_zone = _reaction_source_zones(reactor, frame_w, frame_h)
+    if content_hint is not None and _point_in_zone(
+        content_hint[0], content_hint[1], content_zone
+    ):
+        subject = content_hint
+    else:
+        subject = _zone_center_subject(content_zone)
+    return _pane_crop_in_zone(subject, content_zone, fit_mode="contain")
+
+
+def _normalize_stack_direction(raw: str | None) -> str:
+    v = (raw or "top_bottom").lower().strip().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "top": "top_bottom",
+        "topbottom": "top_bottom",
+        "bottom": "bottom_top",
+        "bottomtop": "bottom_top",
+        "side": "side_by_side",
+        "sidebyside": "side_by_side",
+        "horizontal": "side_by_side",
+        "sbs": "side_by_side",
+    }
+    v = aliases.get(v, v)
+    if v not in ("top_bottom", "bottom_top", "side_by_side"):
+        return "top_bottom"
+    return v
+
+
+def _normalize_fit_mode(raw: str | None, *, layout: str) -> str:
+    v = (raw or "").lower().strip()
+    if v in ("contain", "fit", "blur", "letterbox"):
+        return "contain"
+    if v in ("cover", "fill", "crop"):
+        return "cover"
+    # Reaction defaults to contain (keep people whole + blur fill).
+    return "contain" if layout == "reaction_stack" else "cover"
+
+
+def _assign_dual_panes(
+    reactor_crop: tuple[int, int, int, int],
+    content_crop: tuple[int, int, int, int],
+    stack_direction: str,
+) -> list[SplitPane]:
+    rx, ry, rw, rh = reactor_crop
+    cx, cy, cw, ch = content_crop
+    direction = _normalize_stack_direction(stack_direction)
+    if direction == "bottom_top":
+        return [
+            SplitPane(cx, cy, cw, ch, role="top"),
+            SplitPane(rx, ry, rw, rh, role="bottom"),
+        ]
+    if direction == "side_by_side":
+        return [
+            SplitPane(rx, ry, rw, rh, role="left"),
+            SplitPane(cx, cy, cw, ch, role="right"),
+        ]
+    return [
+        SplitPane(rx, ry, rw, rh, role="top"),
+        SplitPane(cx, cy, cw, ch, role="bottom"),
+    ]
+
+
+def _collect_face_samples(
+    video_path: Path,
+    *,
+    model_cache_dir: Path | None = None,
+    sample_fps: float = 1.5,
+    max_samples: int = 40,
+) -> tuple[int, int, str, list[tuple[float, float, float, float]]]:
+    """Sample faces across the clip. Returns (frame_w, frame_h, detector, faces)."""
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video_path}")
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    step = max(1, int(fps / sample_fps))
+    cache_dir = model_cache_dir or (video_path.parent / ".models")
+    mp_det = _mediapipe_detector(cache_dir)
+    detector_name = "mediapipe" if mp_det is not None else "haar"
+
+    faces_all: list[tuple[float, float, float, float]] = []
+    idx = 0
+    samples = 0
+    while samples < max_samples:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if idx % step == 0:
+            faces: list[tuple[float, float, float, float]] = []
+            if mp_det is not None:
+                faces = _detect_faces_mediapipe(frame, mp_det)
+            if not faces:
+                faces = _detect_faces_haar(frame)
+            faces_all.extend(faces)
+            samples += 1
+        idx += 1
+    cap.release()
+    return frame_w, frame_h, detector_name, faces_all
+
+
+def _cluster_two_faces(
+    faces: list[tuple[float, float, float, float]],
+    frame_w: int,
+) -> tuple[tuple[float, float, float, float], tuple[float, float, float, float]] | None:
+    """Pick two stable speaker positions from sampled face boxes."""
+    if len(faces) < 2:
+        return None
+    # Sort by x and split into left/right halves of the frame.
+    left = [f for f in faces if f[0] < frame_w * 0.5]
+    right = [f for f in faces if f[0] >= frame_w * 0.5]
+    if left and right:
+        def median_face(group: list[tuple[float, float, float, float]]):
+            xs = sorted(f[0] for f in group)
+            ys = sorted(f[1] for f in group)
+            ws = sorted(f[2] for f in group)
+            hs = sorted(f[3] for f in group)
+            mid = len(group) // 2
+            return xs[mid], ys[mid], ws[mid], hs[mid]
+
+        return median_face(left), median_face(right)
+
+    # Fallback: two largest faces that are far apart horizontally.
+    ranked = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
+    a = ranked[0]
+    b = None
+    for cand in ranked[1:]:
+        if abs(cand[0] - a[0]) > frame_w * 0.18:
+            b = cand
+            break
+    if b is None:
+        return None
+    pair = sorted([a, b], key=lambda f: f[0])
+    return pair[0], pair[1]
+
+
+def compute_dual_layout_plan(
+    video_path: Path,
+    *,
+    layout: str,
+    aspect: str = "9:16",
+    model_cache_dir: Path | None = None,
+    focal_x: float | None = None,
+    stack_direction: str = "top_bottom",
+    panel_ratio: float = 0.5,
+    fit_mode: str | None = None,
+) -> ReframePlan:
+    """Build a dual-panel plan: podcast split or reaction (creator + content).
+
+    Panel pixel sizes are derived from ``aspect`` + ``stack_direction`` +
+    ``panel_ratio``. Each logical source is cropped independently; FFmpeg then
+    fits (contain+blur) or covers without stretching faces.
+    """
+    layout = (layout or "split_stack").lower().strip()
+    if layout not in ("split_stack", "reaction_stack"):
+        layout = "split_stack"
+    if aspect not in ASPECT_MAP:
+        aspect = "9:16"
+    stack_direction = _normalize_stack_direction(stack_direction)
+    fit_mode = _normalize_fit_mode(fit_mode, layout=layout)
+    panel_ratio = max(0.25, min(0.75, float(panel_ratio or 0.5)))
+    output_aspect = ASPECT_MAP[aspect]
+    primary_pane_ratio = _panel_aspect_ratio(
+        output_aspect, stack_direction, panel_ratio, primary=True
+    )
+    secondary_pane_ratio = _panel_aspect_ratio(
+        output_aspect, stack_direction, panel_ratio, primary=False
+    )
+
+    frame_w, frame_h, detector_name, faces = _collect_face_samples(
+        video_path, model_cache_dir=model_cache_dir
+    )
+    # Full-frame crop kept as fallback / metadata.
+    full_w, full_h = _crop_dims(frame_w, frame_h, output_aspect)
+    full_x, full_y = _clamp_crop(frame_w / 2, frame_h * 0.42, full_w, full_h, frame_w, frame_h)
+
+    pair = _cluster_two_faces(faces, frame_w) if faces else None
+
+    def _finish(
+        reactor_crop: tuple[int, int, int, int],
+        content_crop: tuple[int, int, int, int],
+        *,
+        used_fallback: bool,
+        layout_name: str,
+    ) -> ReframePlan:
+        # Guarantee non-overlapping source crops.
+        a = (
+            float(reactor_crop[0]),
+            float(reactor_crop[1]),
+            float(reactor_crop[0] + reactor_crop[2]),
+            float(reactor_crop[1] + reactor_crop[3]),
+        )
+        b = (
+            float(content_crop[0]),
+            float(content_crop[1]),
+            float(content_crop[0] + content_crop[2]),
+            float(content_crop[1] + content_crop[3]),
+        )
+        if _rect_overlap_area(a, b) > 1.0:
+            # Fall back to zone centers if something went wrong.
+            primary = (
+                reactor_crop[0] + reactor_crop[2] / 2,
+                reactor_crop[1] + reactor_crop[3] / 2,
+                float(reactor_crop[2]),
+                float(reactor_crop[3]),
+            )
+            rz, cz = _reaction_source_zones(primary, frame_w, frame_h)
+            reactor_crop = _loose_zone_crop(_zone_center_subject(rz), rz)
+            content_crop = _loose_zone_crop(_zone_center_subject(cz), cz)
+        panes = _assign_dual_panes(reactor_crop, content_crop, stack_direction)
+        return ReframePlan(
+            crop_x=full_x,
+            crop_y=full_y,
+            crop_w=full_w,
+            crop_h=full_h,
+            used_center_fallback=used_fallback,
+            aspect=aspect,
+            detector=detector_name,
+            focal_x=focal_x,
+            switch_style="split",
+            layout=layout_name,
+            panes=panes,
+            stack_direction=stack_direction,
+            panel_ratio=panel_ratio,
+            fit_mode=fit_mode,
+        )
+
+    if layout == "split_stack" and pair is not None:
+        left, right = pair
+        if abs(left[1] - right[1]) > abs(left[0] - right[0]) * 1.2:
+            top_f, bot_f = sorted([left, right], key=lambda f: f[1])
+        else:
+            top_f, bot_f = left, right
+        # Podcast: independent face crops (cover/contain per fit_mode).
+        # Use synthetic zones around each face so crops never share pixels.
+        def face_zone(f: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
+            cx, cy, fw, fh = f
+            zw = int(min(frame_w, max(fw * 5.0, frame_w * 0.35)))
+            zh = int(min(frame_h, max(fh * 5.5, frame_h * 0.55)))
+            x = int(max(0, min(frame_w - zw, cx - zw / 2)))
+            y = int(max(0, min(frame_h - zh, cy - zh * 0.4)))
+            return x, y, zw, zh
+
+        z_top = face_zone(top_f)
+        z_bot = face_zone(bot_f)
+        reactor_crop = _pane_crop_in_zone(
+            top_f, z_top, pane_ratio=primary_pane_ratio, fit_mode=fit_mode
+        )
+        content_crop = _pane_crop_in_zone(
+            bot_f, z_bot, pane_ratio=secondary_pane_ratio, fit_mode=fit_mode
+        )
+        return _finish(reactor_crop, content_crop, used_fallback=False, layout_name="split_stack")
+
+    # Seed reactor face for reaction (or split fallback).
+    if faces:
+        primary = max(faces, key=lambda f: f[2] * f[3])
+        if focal_x is not None:
+            primary = min(
+                faces, key=lambda f: abs(f[0] / max(frame_w, 1) - float(focal_x))
+            )
+    else:
+        primary = (frame_w * 0.5, frame_h * 0.35, frame_w * 0.2, frame_h * 0.25)
+
+    if pair is not None:
+        left, right = pair
+        if focal_x is not None:
+            primary = min(
+                [left, right],
+                key=lambda f: abs(f[0] / max(frame_w, 1) - float(focal_x)),
+            )
+        else:
+            primary = max([left, right], key=lambda f: f[2] * f[3])
+
+    reactor_zone, content_zone = _reaction_source_zones(primary, frame_w, frame_h)
+
+    if layout == "reaction_stack":
+        # Independent detection inside each zone (never share bounding boxes).
+        _det_r, reactor_faces = _collect_zone_face_samples(
+            video_path, reactor_zone, model_cache_dir=model_cache_dir
+        )
+        _det_c, content_faces = _collect_zone_face_samples(
+            video_path, content_zone, model_cache_dir=model_cache_dir
+        )
+        reactor_subject = _pick_subject_in_zone(reactor_faces, reactor_zone)
+        if not reactor_faces and _point_in_zone(primary[0], primary[1], reactor_zone):
+            reactor_subject = primary
+        content_subject = _pick_subject_in_zone(content_faces, content_zone)
+
+        reactor_crop = _pane_crop_in_zone(
+            reactor_subject,
+            reactor_zone,
+            pane_ratio=primary_pane_ratio,
+            fit_mode=fit_mode,
+        )
+        content_crop = _pane_crop_in_zone(
+            content_subject,
+            content_zone,
+            pane_ratio=secondary_pane_ratio,
+            fit_mode=fit_mode,
+        )
+        return _finish(
+            reactor_crop,
+            content_crop,
+            used_fallback=len(faces) < 1,
+            layout_name="reaction_stack",
+        )
+
+    # Split fallback with <2 faces.
+    reactor_crop = _pane_crop_around(
+        primary[0],
+        primary[1],
+        frame_w,
+        frame_h,
+        face_w=primary[2],
+        face_h=primary[3],
+    )
+    content_crop = _pane_crop_in_zone(
+        _zone_center_subject(content_zone),
+        content_zone,
+        pane_ratio=secondary_pane_ratio,
+        fit_mode=fit_mode,
+    )
+    return _finish(
+        reactor_crop,
+        content_crop,
+        used_fallback=len(faces) < 1,
+        layout_name="split_stack",
+    )
 
 
 def _ema_with_cuts(
@@ -944,6 +1633,17 @@ def _windows_fonts_dir() -> Path | None:
     return fonts if fonts.is_dir() else None
 
 
+def _ass_filter_suffix(ass_path: Path | None) -> str:
+    if not ass_path or not ass_path.exists():
+        return ""
+    ass_esc = str(ass_path.resolve()).replace("\\", "/").replace(":", r"\:")
+    fonts = _windows_fonts_dir()
+    if fonts is not None:
+        fonts_esc = str(fonts.resolve()).replace("\\", "/").replace(":", r"\:")
+        return f",ass='{ass_esc}':fontsdir='{fonts_esc}'"
+    return f",ass='{ass_esc}'"
+
+
 def ffmpeg_vf_chain(
     plan: ReframePlan,
     *,
@@ -952,6 +1652,7 @@ def ffmpeg_vf_chain(
     ass_path: Path | None,
     sendcmd_path: Path | None,
 ) -> str:
+    """Single-pane crop → scale → optional ASS. Not used for split layouts."""
     # Reset timestamps so ASS times (0-based) match section downloads from yt-dlp
     parts: list[str] = ["setpts=PTS-STARTPTS"]
     if sendcmd_path and sendcmd_path.exists() and plan.keyframes:
@@ -963,12 +1664,97 @@ def ffmpeg_vf_chain(
     else:
         parts.append(ffmpeg_crop_filter(plan))
     parts.append(f"scale={out_w}:{out_h}:flags=fast_bilinear")
-    if ass_path and ass_path.exists():
-        ass_esc = str(ass_path.resolve()).replace("\\", "/").replace(":", r"\:")
-        fonts = _windows_fonts_dir()
-        if fonts is not None:
-            fonts_esc = str(fonts.resolve()).replace("\\", "/").replace(":", r"\:")
-            parts.append(f"ass='{ass_esc}':fontsdir='{fonts_esc}'")
-        else:
-            parts.append(f"ass='{ass_esc}'")
+    suffix = _ass_filter_suffix(ass_path)
+    if suffix:
+        parts.append(suffix.lstrip(","))
     return ",".join(parts)
+
+
+def _ffmpeg_pane_branch(
+    src: str,
+    pane: SplitPane,
+    pw: int,
+    ph: int,
+    out_label: str,
+    fit_mode: str,
+) -> str:
+    """Build one panel: independent crop, then contain+blur or cover scale (no stretch)."""
+    crop = f"crop={pane.crop_w}:{pane.crop_h}:{pane.crop_x}:{pane.crop_y}"
+    mode = (fit_mode or "contain").lower().strip()
+    if mode == "cover":
+        # Crop already matches panel aspect; scale to exact panel pixels.
+        return (
+            f"[{src}]{crop},"
+            f"scale={pw}:{ph}:flags=fast_bilinear[{out_label}];"
+        )
+    # Contain: fit inside panel, fill leftover with blurred copy of the same crop.
+    fg = f"fg{out_label}"
+    bg = f"bg{out_label}"
+    bgb = f"bgb{out_label}"
+    fgf = f"fgf{out_label}"
+    return (
+        f"[{src}]{crop},split=2[{fg}][{bg}];"
+        f"[{bg}]scale={pw}:{ph}:force_original_aspect_ratio=increase,"
+        f"crop={pw}:{ph},boxblur=18:8[{bgb}];"
+        f"[{fg}]scale={pw}:{ph}:force_original_aspect_ratio=decrease[{fgf}];"
+        f"[{bgb}][{fgf}]overlay=(W-w)/2:(H-h)/2[{out_label}];"
+    )
+
+
+def ffmpeg_split_filter_complex(
+    plan: ReframePlan,
+    *,
+    out_w: int,
+    out_h: int,
+    ass_path: Path | None,
+) -> str:
+    """Compose two independent crops onto the output canvas (stack or side-by-side).
+
+    Panel sizes come from ``plan.aspect`` via ``out_w``/``out_h`` plus
+    ``stack_direction`` / ``panel_ratio``. Each branch never reuses the other
+    pane's crop coordinates. Contain mode preserves aspect (no face stretch)
+    and fills gaps with a blurred background from the same source crop.
+    """
+    if len(plan.panes) < 2:
+        raise ValueError("split layout requires two panes")
+
+    direction = _normalize_stack_direction(plan.stack_direction)
+    fit_mode = _normalize_fit_mode(plan.fit_mode, layout=plan.layout or "reaction_stack")
+    (pw0, ph0), (pw1, ph1) = _panel_pixel_sizes(
+        out_w, out_h, direction, plan.panel_ratio
+    )
+
+    if direction == "side_by_side":
+        first = next((p for p in plan.panes if p.role == "left"), plan.panes[0])
+        second = next((p for p in plan.panes if p.role == "right"), plan.panes[1])
+        stack_op = "hstack"
+        labels = ("left", "right")
+        sizes = ((pw0, ph0), (pw1, ph1))
+    else:
+        first = next((p for p in plan.panes if p.role == "top"), plan.panes[0])
+        second = next((p for p in plan.panes if p.role == "bottom"), plan.panes[1])
+        stack_op = "vstack"
+        labels = ("top", "bot")
+        # For bottom_top, panes are already role-swapped; panel_ratio still
+        # describes the reactor share — map sizes by which role is primary.
+        if direction == "bottom_top":
+            # Reactor is bottom → secondary size on top, primary on bottom.
+            sizes = ((pw1, ph1), (pw0, ph0))
+        else:
+            sizes = ((pw0, ph0), (pw1, ph1))
+
+    ass = _ass_filter_suffix(ass_path)
+    if ass:
+        stack_tail = f"{stack_op}=inputs=2{ass}[vout]"
+    else:
+        stack_tail = f"{stack_op}=inputs=2[vout]"
+
+    a0, a1 = labels
+    (w0, h0), (w1, h1) = sizes
+    branch0 = _ffmpeg_pane_branch("s0", first, w0, h0, a0, fit_mode)
+    branch1 = _ffmpeg_pane_branch("s1", second, w1, h1, a1, fit_mode)
+    return (
+        f"[0:v]setpts=PTS-STARTPTS,split=2[s0][s1];"
+        f"{branch0}{branch1}"
+        f"[{a0}][{a1}]{stack_tail}"
+    )

@@ -3,6 +3,7 @@ import { handleRouteError, jsonError, jsonOk, rateLimit } from "@/lib/api";
 import { requireUser } from "@/lib/auth/session";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { cropSettingsForFramingMode } from "@/lib/framing";
 import { CLIP_COUNT_OPTIONS } from "@/lib/types";
 import { validateVideoUrl } from "@/lib/validation/url";
 import { getUsageInfo, reserveClipQuota } from "@/lib/quota";
@@ -15,11 +16,14 @@ const createSchema = z.object({
   captionPreset: z.string().default("classic_white"),
   captionLanguage: z.string().default("en"),
   captionSettings: z.record(z.string(), z.unknown()).optional().default({}),
+  cropSettings: z.record(z.string(), z.unknown()).optional(),
   platformPreset: z
     .enum(["youtube_shorts", "tiktok", "instagram_reels", "custom"])
     .default("youtube_shorts"),
   quality: z.enum(["draft", "balanced", "high"]).default("draft"),
 });
+
+const DEFAULT_CROP = cropSettingsForFramingMode("smart_auto");
 
 export async function GET() {
   try {
@@ -88,12 +92,7 @@ export async function POST(request: Request) {
       language: body.captionLanguage,
       platform_preset: body.platformPreset,
       quality: body.quality,
-      crop_settings: {
-        focal_x: 0.5,
-        mode: "auto",
-        speaker_focus: true,
-        tracking_mode: "hard_cut",
-      },
+      crop_settings: body.cropSettings ?? DEFAULT_CROP,
     };
 
     const { data: job, error: jobError } = await admin

@@ -14,6 +14,13 @@ from pipeline.transcript import TranscriptSegment
 
 logger = logging.getLogger(__name__)
 
+# Drop weak candidates unless nothing else qualifies.
+_MIN_QUALITY_SCORE = 0.48
+# Prefer at least this much separation between auto-picked clips.
+_OVERLAP_IOU_MAX = 0.35
+_WORD_RE = re.compile(r"[A-Za-z\u0900-\u097F']+")
+SENTENCE_END = re.compile(r"[.!?…]\s+")
+
 
 @dataclass
 class MomentCandidate:
@@ -37,11 +44,201 @@ class MomentCandidate:
         }
 
 
-SENTENCE_END = re.compile(r"[.!?…]\s+")
+# Viral-signal lexicon: (label, phrases/words, weight). Grounded in transcript only.
+_SIGNAL_GROUPS: list[tuple[str, tuple[str, ...], float]] = [
+    (
+        "hook",
+        (
+            "wait",
+            "hold on",
+            "oh my god",
+            "omg",
+            "no way",
+            "what the",
+            "dude",
+            "bro look",
+            "watch this",
+            "check this",
+            "you won't",
+            "you wont",
+            "listen",
+            "look at",
+        ),
+        0.12,
+    ),
+    (
+        "shock",
+        (
+            "unbelievable",
+            "insane",
+            "crazy",
+            "wild",
+            "holy",
+            "wtf",
+            "impossible",
+            "no shot",
+            "are you kidding",
+            "shocked",
+            "surprised",
+        ),
+        0.11,
+    ),
+    (
+        "drama",
+        (
+            "fight",
+            "argue",
+            "argument",
+            "beef",
+            "versus",
+            "against",
+            "hate",
+            "betray",
+            "lie",
+            "liar",
+            "scam",
+            "exposed",
+            "caught",
+            "banned",
+            "fired",
+            "quit",
+            "break up",
+            "broke up",
+        ),
+        0.12,
+    ),
+    (
+        "emotion",
+        (
+            "cry",
+            "crying",
+            "tears",
+            "scared",
+            "terrified",
+            "afraid",
+            "love",
+            "heart",
+            "sorry",
+            "apologize",
+            "apology",
+            "mad",
+            "furious",
+            "angry",
+            "rage",
+            "yelling",
+            "screaming",
+            "emotional",
+        ),
+        0.10,
+    ),
+    (
+        "humor",
+        (
+            "laugh",
+            "laughing",
+            "funny",
+            "hilarious",
+            "joke",
+            "meme",
+            "lol",
+            "lmao",
+            "roast",
+            "troll",
+            "prank",
+        ),
+        0.09,
+    ),
+    (
+        "stakes",
+        (
+            "million",
+            "thousand",
+            "money",
+            "bet",
+            "challenge",
+            "win",
+            "lose",
+            "lost",
+            "died",
+            "dead",
+            "kill",
+            "danger",
+            "police",
+            "cops",
+            "arrest",
+            "help",
+            "emergency",
+        ),
+        0.10,
+    ),
+    (
+        "payoff",
+        (
+            "finally",
+            "that's why",
+            "thats why",
+            "because",
+            "so then",
+            "turns out",
+            "the truth",
+            "secret",
+            "reveal",
+            "ending",
+            "result",
+            "won",
+            "clutch",
+            "first time",
+            "never done",
+            "never been",
+        ),
+        0.09,
+    ),
+    (
+        "curiosity",
+        (
+            "why",
+            "how",
+            "what if",
+            "secret",
+            "truth",
+            "mistake",
+            "hack",
+            "tip",
+            "never",
+            "always",
+            "worst",
+            "best",
+            "only",
+        ),
+        0.06,
+    ),
+]
+
+_FILLER = {
+    "um",
+    "uh",
+    "uhm",
+    "like",
+    "you know",
+    "basically",
+    "literally",
+    "actually",
+    "kinda",
+    "sorta",
+    "yeah",
+    "okay",
+    "ok",
+    "right",
+    "so",
+    "and",
+    "the",
+    "a",
+    "an",
+}
 
 
 def _sentences_from_segments(
-    segments: list[TranscriptSegment], max_duration: float, min_duration: float = 15.0
+    segments: list[TranscriptSegment], max_duration: float, min_duration: float = 12.0
 ) -> list[tuple[float, float, str]]:
     """Merge transcript into sentence-bounded chunks within duration limits."""
     if not segments:
@@ -51,26 +248,30 @@ def _sentences_from_segments(
     buf: list[str] = []
     start = segments[0].start
     end = segments[0].end
+    floor = min(min_duration, max(8.0, max_duration * 0.35))
 
     def flush() -> None:
         nonlocal buf, start, end
         if not buf:
             return
         text = " ".join(buf).strip()
-        if text and (end - start) >= min(min_duration, max_duration * 0.5):
+        if text and (end - start) >= floor:
             chunks.append((start, end, text))
         buf = []
 
     for seg in segments:
         if not buf:
             start = seg.start
-        buf.append(seg.text.strip())
+        piece = (seg.text or "").strip()
+        if not piece:
+            continue
+        buf.append(piece)
         end = seg.end
         text = " ".join(buf)
         if (end - start) >= max_duration:
             flush()
             continue
-        if SENTENCE_END.search(text + " "):
+        if SENTENCE_END.search(text + " ") and (end - start) >= floor:
             flush()
 
     if buf:
@@ -79,6 +280,217 @@ def _sentences_from_segments(
             chunks.append((start, end, text))
 
     return chunks
+
+
+def _sliding_windows(
+    segments: list[TranscriptSegment],
+    max_duration: float,
+    *,
+    step: float = 8.0,
+) -> list[tuple[float, float, str]]:
+    """Dense candidate windows so peak moments aren't missed between sentences."""
+    if not segments:
+        return []
+    t0 = float(segments[0].start)
+    t1 = float(segments[-1].end)
+    if t1 <= t0:
+        return []
+    windows: list[tuple[float, float, str]] = []
+    target = max(12.0, min(max_duration, 45.0))
+    cur = t0
+    while cur < t1:
+        end = min(t1, cur + target)
+        text = " ".join(
+            (s.text or "").strip()
+            for s in segments
+            if s.end > cur and s.start < end and (s.text or "").strip()
+        ).strip()
+        if text and (end - cur) >= 8.0:
+            windows.append((cur, end, text))
+        if end >= t1:
+            break
+        cur += step
+    return windows
+
+
+def _normalize_words(text: str) -> list[str]:
+    return [w.lower() for w in _WORD_RE.findall(text or "")]
+
+
+def _signal_hits(lower: str) -> list[str]:
+    hits: list[str] = []
+    for label, phrases, _weight in _SIGNAL_GROUPS:
+        if any(p in lower for p in phrases):
+            hits.append(label)
+    return hits
+
+
+def _score_text(text: str, *, duration: float) -> tuple[float, list[str]]:
+    """Score viral potential from grounded transcript signals only."""
+    lower = (text or "").lower()
+    words = _normalize_words(text)
+    n = len(words)
+    if n < 6:
+        return 0.0, ["too_short"]
+
+    score = 0.18
+    reasons: list[str] = []
+
+    # Signal lexicon
+    for label, phrases, weight in _SIGNAL_GROUPS:
+        count = sum(1 for p in phrases if p in lower)
+        if count:
+            score += min(weight * 1.6, weight + count * 0.03)
+            reasons.append(label)
+
+    # Opening hook: question / imperative / strong punctuation early
+    head = lower[:120]
+    if "?" in text[:160] or any(
+        head.startswith(p) for p in ("wait", "oh", "bro", "dude", "what", "why", "how", "look", "no ")
+    ):
+        score += 0.08
+        reasons.append("open_hook")
+    if "!" in text:
+        score += 0.05
+        reasons.append("exclaim")
+    if "?" in text:
+        score += 0.06
+        reasons.append("question")
+
+    # Density of content words vs filler (boring monologues score lower)
+    filler_n = sum(1 for w in words if w in _FILLER)
+    content_ratio = 1.0 - (filler_n / max(1, n))
+    if content_ratio >= 0.72:
+        score += 0.06
+        reasons.append("dense")
+    elif content_ratio < 0.45:
+        score -= 0.08
+        reasons.append("filler_heavy")
+
+    # Ideal short-form length (~18–45s)
+    if 15.0 <= duration <= 45.0:
+        score += 0.07
+        reasons.append("ideal_len")
+    elif duration < 10.0 or duration > 70.0:
+        score -= 0.06
+        reasons.append("awkward_len")
+
+    # Payoff near the end of the window
+    tail = lower[max(0, len(lower) - 140) :]
+    if any(
+        p in tail
+        for p in ("finally", "turns out", "that's why", "thats why", "won", "lost", "dead", "sorry")
+    ):
+        score += 0.07
+        reasons.append("payoff_tail")
+
+    # ALL-CAPS / elongated words ≈ energy
+    if re.search(r"\b[A-Z]{3,}\b", text or "") or re.search(r"(.)\1{2,}", lower):
+        score += 0.04
+        reasons.append("energy")
+
+    # Penalize pure greetings / housekeeping
+    boring = (
+        "subscribe",
+        "like and subscribe",
+        "comment below",
+        "thanks for watching",
+        "welcome back",
+        "don't forget to",
+        "link in bio",
+        "follow me",
+    )
+    if any(b in lower for b in boring):
+        score -= 0.15
+        reasons.append("cta_spam")
+
+    score = max(0.0, min(0.99, score))
+    return score, reasons
+
+
+def _title_from_text(text: str) -> str:
+    clean = re.sub(r"\s+", " ", (text or "").strip())
+    # Prefer first sentence / clause as title seed
+    m = re.split(r"[.!?…]+\s+", clean, maxsplit=1)
+    seed = (m[0] if m else clean).strip()
+    if len(seed) < 12:
+        seed = clean
+    if len(seed) > 72:
+        seed = seed[:69].rstrip() + "…"
+    return seed or "Clip"
+
+
+def _hook_from_text(text: str) -> str:
+    clean = re.sub(r"\s+", " ", (text or "").strip())
+    if len(clean) > 140:
+        return clean[:137].rstrip() + "…"
+    return clean
+
+
+def _iou(a0: float, a1: float, b0: float, b1: float) -> float:
+    inter = max(0.0, min(a1, b1) - max(a0, b0))
+    if inter <= 0:
+        return 0.0
+    union = max(a1, b1) - min(a0, b0)
+    return inter / union if union > 0 else 0.0
+
+
+def _dedupe_moments(cands: list[MomentCandidate]) -> list[MomentCandidate]:
+    """Keep highest-scoring non-overlapping moments."""
+    kept: list[MomentCandidate] = []
+    for c in sorted(cands, key=lambda x: x.score, reverse=True):
+        if any(_iou(c.start, c.end, k.start, k.end) > _OVERLAP_IOU_MAX for k in kept):
+            continue
+        # Near-duplicate text
+        c_words = set(_normalize_words(c.hook)[:18])
+        if c_words and any(
+            len(c_words & set(_normalize_words(k.hook)[:18])) / max(1, len(c_words)) > 0.72
+            for k in kept
+        ):
+            continue
+        kept.append(c)
+    return kept
+
+
+def _quality_gate(
+    cands: list[MomentCandidate],
+    *,
+    clip_count: int,
+) -> list[MomentCandidate]:
+    """Return fewer clips when quality is low; never pad with junk."""
+    if not cands:
+        return []
+    strong = [c for c in cands if c.score >= _MIN_QUALITY_SCORE]
+    if strong:
+        # Cap pool: enough for UI pick, but not a wall of mediocre options.
+        limit = max(clip_count, min(len(strong), clip_count * 2))
+        return strong[:limit]
+    # Nothing cleared the bar — keep only the single best moment.
+    return cands[:1]
+
+
+def _snap_to_segments(
+    start: float,
+    end: float,
+    segments: list[TranscriptSegment],
+    max_duration: float,
+) -> tuple[float, float, str] | None:
+    """Clamp LLM times onto real transcript coverage."""
+    if not segments or end <= start:
+        return None
+    covered = [s for s in segments if s.end >= start and s.start <= end]
+    if not covered:
+        # Nearest segment window
+        nearest = min(segments, key=lambda s: abs(((s.start + s.end) / 2) - (start + end) / 2))
+        covered = [nearest]
+    s0 = float(covered[0].start)
+    s1 = float(covered[-1].end)
+    if s1 - s0 > max_duration:
+        s1 = s0 + max_duration
+    text = " ".join((s.text or "").strip() for s in covered if (s.text or "").strip()).strip()
+    if not text or s1 - s0 < 5.0:
+        return None
+    return s0, s1, text
 
 
 class MomentAnalyzer(ABC):
@@ -94,30 +506,7 @@ class MomentAnalyzer(ABC):
 
 
 class HeuristicAnalyzer(MomentAnalyzer):
-    """Free, offline scoring using keyword and pacing heuristics."""
-
-    BOOST_WORDS = (
-        "secret",
-        "never",
-        "always",
-        "why",
-        "how",
-        "best",
-        "worst",
-        "mistake",
-        "truth",
-        "hack",
-        "tip",
-        "story",
-        "crazy",
-        "insane",
-        "million",
-        "free",
-        "stop",
-        "start",
-        "you",
-        "watch",
-    )
+    """Offline viral scoring: hooks, drama, humor, payoffs — no LLM cost."""
 
     def analyze(
         self,
@@ -126,36 +515,46 @@ class HeuristicAnalyzer(MomentAnalyzer):
         clip_count: int,
         max_clip_duration: float,
     ) -> list[MomentCandidate]:
-        chunks = _sentences_from_segments(segments, max_clip_duration)
+        sentence_chunks = _sentences_from_segments(segments, max_clip_duration)
+        window_chunks = _sliding_windows(segments, max_clip_duration)
+        # Prefer sentence boundaries; fill gaps with sliding windows.
+        seen: set[tuple[int, int]] = set()
+        pooled: list[tuple[float, float, str]] = []
+        for start, end, text in [*sentence_chunks, *window_chunks]:
+            key = (int(start * 10), int(end * 10))
+            if key in seen:
+                continue
+            seen.add(key)
+            pooled.append((start, end, text))
+
         candidates: list[MomentCandidate] = []
-        for start, end, text in chunks:
-            lower = text.lower()
-            words = re.findall(r"\w+", lower)
+        for start, end, text in pooled:
+            words = _normalize_words(text)
             if len(words) < 8:
                 continue
-            score = 0.35
-            score += min(0.25, len(words) / 200.0)
-            boosts = sum(1 for w in self.BOOST_WORDS if w in lower)
-            score += min(0.25, boosts * 0.04)
-            if "?" in text:
-                score += 0.08
-            if "!" in text:
-                score += 0.05
-            score = min(0.99, score)
-            title = text[:80].rstrip() + ("…" if len(text) > 80 else "")
-            hook = text[:140].rstrip() + ("…" if len(text) > 140 else "")
+            duration = max(0.1, end - start)
+            score, reasons = _score_text(text, duration=duration)
+            if score < 0.28:
+                continue
+            hits = _signal_hits(text.lower())
+            explanation = (
+                "Viral signals: " + ", ".join(dict.fromkeys(reasons + hits))
+                if reasons or hits
+                else "Speech density and pacing"
+            )
             candidates.append(
                 MomentCandidate(
                     start=start,
                     end=end,
-                    title=title,
-                    hook=hook,
+                    title=_title_from_text(text),
+                    hook=_hook_from_text(text),
                     score=score,
-                    explanation="Heuristic: keyword density, length, and punctuation.",
+                    explanation=explanation[:280],
                 )
             )
-        candidates.sort(key=lambda c: c.score, reverse=True)
-        return candidates[: max(clip_count * 3, clip_count)]
+
+        candidates = _dedupe_moments(candidates)
+        return _quality_gate(candidates, clip_count=clip_count)
 
 
 class GroqJsonAnalyzer(MomentAnalyzer):
@@ -175,10 +574,16 @@ class GroqJsonAnalyzer(MomentAnalyzer):
             f"[{s.start:.1f}-{s.end:.1f}] {s.text}" for s in segments[:500]
         )
         prompt = (
-            "Return JSON array of up to "
-            f"{clip_count * 2} viral short-form clip candidates. Each object: "
-            "start (seconds), end (seconds), title, hook, score (0-1), explanation. "
-            f"Clips should be <= {max_clip_duration}s and align to sentence boundaries.\n\n"
+            "You pick viral short-form clip moments from a timestamped transcript.\n"
+            "Rules:\n"
+            "- Prefer strong hooks, drama, humor, surprises, or emotional payoffs.\n"
+            "- Use ONLY events stated in the transcript — never invent.\n"
+            "- Align start/end to the given timestamps; clips <= "
+            f"{max_clip_duration}s.\n"
+            "- Skip boring greetings, CTAs, and duplicate moments.\n"
+            f"- Return up to {clip_count * 2} candidates ranked by viral potential.\n"
+            "JSON object with key \"moments\": array of "
+            "{start, end, title, hook, score (0-1), explanation}.\n\n"
             f"Transcript:\n{transcript}"
         )
         headers = {
@@ -189,7 +594,7 @@ class GroqJsonAnalyzer(MomentAnalyzer):
             "model": "llama-3.3-70b-versatile",
             "messages": [{"role": "user", "content": prompt}],
             "response_format": {"type": "json_object"},
-            "temperature": 0.3,
+            "temperature": 0.25,
         }
         with httpx.Client(timeout=120.0) as client:
             resp = client.post(
@@ -199,7 +604,12 @@ class GroqJsonAnalyzer(MomentAnalyzer):
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"]
-        return _parse_llm_moments(content, clip_count)
+        return _parse_llm_moments(
+            content,
+            clip_count=clip_count,
+            segments=segments,
+            max_clip_duration=max_clip_duration,
+        )
 
 
 class GeminiJsonAnalyzer(MomentAnalyzer):
@@ -219,8 +629,12 @@ class GeminiJsonAnalyzer(MomentAnalyzer):
             f"[{s.start:.1f}-{s.end:.1f}] {s.text}" for s in segments[:500]
         )
         prompt = (
-            "Return JSON with key moments as array. Fields: start, end, title, hook, score, explanation. "
-            f"Max clip length {max_clip_duration}s. Pick up to {clip_count * 2} items.\n\n{transcript}"
+            "Pick viral short-form moments from this timestamped transcript. "
+            "Prefer hooks, drama, humor, surprise, emotional payoff. "
+            "Never invent events. Clips <= "
+            f"{max_clip_duration}s. Up to {clip_count * 2} items. "
+            'Return JSON {"moments":[{start,end,title,hook,score,explanation}]}.\n\n'
+            f"{transcript}"
         )
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -231,10 +645,21 @@ class GeminiJsonAnalyzer(MomentAnalyzer):
             resp = client.post(url, json=body)
             resp.raise_for_status()
             content = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        return _parse_llm_moments(content, clip_count)
+        return _parse_llm_moments(
+            content,
+            clip_count=clip_count,
+            segments=segments,
+            max_clip_duration=max_clip_duration,
+        )
 
 
-def _parse_llm_moments(raw: str, clip_count: int) -> list[MomentCandidate]:
+def _parse_llm_moments(
+    raw: str,
+    *,
+    clip_count: int,
+    segments: list[TranscriptSegment] | None = None,
+    max_clip_duration: float = 60.0,
+) -> list[MomentCandidate]:
     text = raw.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
@@ -244,21 +669,43 @@ def _parse_llm_moments(raw: str, clip_count: int) -> list[MomentCandidate]:
     out: list[MomentCandidate] = []
     for item in items:
         try:
+            start = float(item["start"])
+            end = float(item["end"])
+            title = str(item.get("title", "Clip"))
+            hook = str(item.get("hook", ""))
+            score = float(item.get("score", 0.5))
+            explanation = str(item.get("explanation", "LLM selected"))
+            if segments:
+                snapped = _snap_to_segments(start, end, segments, max_clip_duration)
+                if not snapped:
+                    continue
+                start, end, snap_text = snapped
+                # Re-score lightly with heuristics so invented high scores don't dominate.
+                h_score, reasons = _score_text(snap_text, duration=end - start)
+                score = max(0.0, min(0.99, 0.55 * score + 0.45 * h_score))
+                if not hook.strip():
+                    hook = _hook_from_text(snap_text)
+                if not title.strip() or title.strip().lower() == "clip":
+                    title = _title_from_text(snap_text)
+                if reasons:
+                    explanation = f"{explanation} | signals: {', '.join(reasons[:6])}"
+            if end - start < 5.0:
+                continue
             out.append(
                 MomentCandidate(
-                    start=float(item["start"]),
-                    end=float(item["end"]),
-                    title=str(item.get("title", "Clip")),
-                    hook=str(item.get("hook", "")),
-                    score=float(item.get("score", 0.5)),
-                    explanation=str(item.get("explanation", "LLM selected")),
+                    start=start,
+                    end=end,
+                    title=title,
+                    hook=hook,
+                    score=score,
+                    explanation=explanation[:280],
                     id=str(item.get("id")) if item.get("id") else None,
                 )
             )
         except (KeyError, TypeError, ValueError):
             continue
-    out.sort(key=lambda c: c.score, reverse=True)
-    return out[: max(clip_count * 3, clip_count)]
+    out = _dedupe_moments(out)
+    return _quality_gate(out, clip_count=clip_count)
 
 
 def get_analyzer(settings: Settings | None = None) -> MomentAnalyzer:

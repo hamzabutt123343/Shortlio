@@ -152,6 +152,7 @@ CREATE TABLE IF NOT EXISTS public.clips (
   burn_captions boolean NOT NULL DEFAULT true,
   quality text NOT NULL DEFAULT 'balanced',
   crop_settings jsonb NOT NULL DEFAULT '{}'::jsonb,
+  viral_metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
   render_status text NOT NULL DEFAULT 'pending'
     CHECK (render_status IN ('pending', 'rendering', 'ready', 'failed')),
   storage_path text,

@@ -16,7 +16,18 @@ export interface CaptionStyle {
   shadow: boolean;
   position: "bottom" | "center" | "top";
   maxWordsPerCaption: number;
-  animation: "none" | "fade" | "pop" | "karaoke" | "word_pop";
+  animation:
+    | "none"
+    | "fade"
+    | "pop"
+    | "karaoke"
+    | "word_pop"
+    | "highlight"
+    | "bounce"
+    | "glow"
+    | "scale"
+    | "box"
+    | "karaoke_wipe";
 }
 
 export const CAPTION_PRESETS: CaptionStyle[] = [
@@ -217,6 +228,115 @@ export const CAPTION_PRESETS: CaptionStyle[] = [
     position: "center",
     maxWordsPerCaption: 4,
     animation: "karaoke",
+  },
+  // Capite-adapted presets (MIT, Capite Contributors)
+  {
+    id: "hormozi",
+    name: "Hormozi",
+    description: "Bold cyan word highlights — Capite trending",
+    fontFamily: "Montserrat",
+    fontSize: 78,
+    fontWeight: 900,
+    textColor: "#FFFFFF",
+    highlightColor: "#00FFFF",
+    outlineColor: "#000000",
+    outlineWidth: 5,
+    backgroundColor: "#000000",
+    backgroundOpacity: 0,
+    shadow: true,
+    position: "center",
+    maxWordsPerCaption: 3,
+    animation: "highlight",
+  },
+  {
+    id: "mrbeast",
+    name: "MrBeast",
+    description: "Yellow + orange highlight punch — Capite trending",
+    fontFamily: "Anton",
+    fontSize: 88,
+    fontWeight: 900,
+    textColor: "#FFFF00",
+    highlightColor: "#FF6600",
+    outlineColor: "#000000",
+    outlineWidth: 8,
+    backgroundColor: "#000000",
+    backgroundOpacity: 0,
+    shadow: true,
+    position: "center",
+    maxWordsPerCaption: 3,
+    animation: "highlight",
+  },
+  {
+    id: "crimson_pop",
+    name: "Crimson Box",
+    description: "Active-word red pill box — Capite box engine",
+    fontFamily: "Montserrat",
+    fontSize: 78,
+    fontWeight: 900,
+    textColor: "#FFFFFF",
+    highlightColor: "#E11D48",
+    outlineColor: "#000000",
+    outlineWidth: 8,
+    backgroundColor: "#E11D48",
+    backgroundOpacity: 0,
+    shadow: false,
+    position: "center",
+    maxWordsPerCaption: 3,
+    animation: "box",
+  },
+  {
+    id: "bounce_pop",
+    name: "Bounce",
+    description: "Spring bounce on the spoken word — Capite bounce",
+    fontFamily: "Poppins",
+    fontSize: 74,
+    fontWeight: 900,
+    textColor: "#FFFFFF",
+    highlightColor: "#FF4D6D",
+    outlineColor: "#000000",
+    outlineWidth: 5,
+    backgroundColor: "#000000",
+    backgroundOpacity: 0,
+    shadow: true,
+    position: "center",
+    maxWordsPerCaption: 3,
+    animation: "bounce",
+  },
+  {
+    id: "neon_glow",
+    name: "Neon Glow",
+    description: "Soft blur glow on active word — Capite glow",
+    fontFamily: "Montserrat",
+    fontSize: 72,
+    fontWeight: 800,
+    textColor: "#E0E7FF",
+    highlightColor: "#22D3EE",
+    outlineColor: "#0F172A",
+    outlineWidth: 4,
+    backgroundColor: "#000000",
+    backgroundOpacity: 0,
+    shadow: true,
+    position: "center",
+    maxWordsPerCaption: 3,
+    animation: "glow",
+  },
+  {
+    id: "scale_clean",
+    name: "Scale Clean",
+    description: "Subtle scale highlight — Capite scale",
+    fontFamily: "Inter",
+    fontSize: 64,
+    fontWeight: 700,
+    textColor: "#F8FAFC",
+    highlightColor: "#FFFFFF",
+    outlineColor: "#0F172A",
+    outlineWidth: 3,
+    backgroundColor: "#000000",
+    backgroundOpacity: 0,
+    shadow: true,
+    position: "center",
+    maxWordsPerCaption: 4,
+    animation: "scale",
   },
 ];
 

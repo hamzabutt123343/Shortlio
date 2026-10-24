@@ -5,10 +5,13 @@ import re
 from pathlib import Path
 from typing import Any
 
+from pipeline.ass_animations import active_word_override, pos_tag
 from pipeline.hinglish import to_hinglish
-from pipeline.transcript import TranscriptSegment
+from pipeline.transcript import TranscriptSegment, TranscriptWord
 
 logger = logging.getLogger(__name__)
+
+# Capite-sourced presets (MIT) — keep IDs snake_case for Shortlio storage.
 
 # Preset defaults aligned with src/lib/captions/presets.ts
 _PRESET_STYLES: dict[str, dict[str, Any]] = {
@@ -177,6 +180,97 @@ _PRESET_STYLES: dict[str, dict[str, Any]] = {
         "maxWordsPerCaption": 4,
         "animation": "karaoke",
     },
+    # --- Capite-adapted presets (MIT, Capite Contributors) ---
+    "hormozi": {
+        "fontFamily": "Montserrat",
+        "fontSize": 78,
+        "fontWeight": 900,
+        "textColor": "#FFFFFF",
+        "highlightColor": "#00FFFF",
+        "outlineColor": "#000000",
+        "outlineWidth": 5,
+        "backgroundColor": "#000000",
+        "backgroundOpacity": 0.0,
+        "shadow": True,
+        "position": "center",
+        "maxWordsPerCaption": 3,
+        "animation": "highlight",
+    },
+    "mrbeast": {
+        "fontFamily": "Anton",
+        "fontSize": 88,
+        "fontWeight": 900,
+        "textColor": "#FFFF00",
+        "highlightColor": "#FF6600",
+        "outlineColor": "#000000",
+        "outlineWidth": 8,
+        "backgroundColor": "#000000",
+        "backgroundOpacity": 0.0,
+        "shadow": True,
+        "position": "center",
+        "maxWordsPerCaption": 3,
+        "animation": "highlight",
+    },
+    "crimson_pop": {
+        "fontFamily": "Montserrat",
+        "fontSize": 78,
+        "fontWeight": 900,
+        "textColor": "#FFFFFF",
+        "highlightColor": "#E11D48",
+        "outlineColor": "#000000",
+        "outlineWidth": 8,
+        "backgroundColor": "#E11D48",
+        "backgroundOpacity": 0.0,
+        "shadow": False,
+        "position": "center",
+        "maxWordsPerCaption": 3,
+        "animation": "box",
+    },
+    "bounce_pop": {
+        "fontFamily": "Poppins",
+        "fontSize": 74,
+        "fontWeight": 900,
+        "textColor": "#FFFFFF",
+        "highlightColor": "#FF4D6D",
+        "outlineColor": "#000000",
+        "outlineWidth": 5,
+        "backgroundColor": "#000000",
+        "backgroundOpacity": 0.0,
+        "shadow": True,
+        "position": "center",
+        "maxWordsPerCaption": 3,
+        "animation": "bounce",
+    },
+    "neon_glow": {
+        "fontFamily": "Montserrat",
+        "fontSize": 72,
+        "fontWeight": 800,
+        "textColor": "#E0E7FF",
+        "highlightColor": "#22D3EE",
+        "outlineColor": "#0F172A",
+        "outlineWidth": 4,
+        "backgroundColor": "#000000",
+        "backgroundOpacity": 0.0,
+        "shadow": True,
+        "position": "center",
+        "maxWordsPerCaption": 3,
+        "animation": "glow",
+    },
+    "scale_clean": {
+        "fontFamily": "Inter",
+        "fontSize": 64,
+        "fontWeight": 700,
+        "textColor": "#F8FAFC",
+        "highlightColor": "#FFFFFF",
+        "outlineColor": "#0F172A",
+        "outlineWidth": 3,
+        "backgroundColor": "#000000",
+        "backgroundOpacity": 0.0,
+        "shadow": True,
+        "position": "center",
+        "maxWordsPerCaption": 4,
+        "animation": "scale",
+    },
 }
 
 # Prefer real family names so libass/fontsdir can match preview fonts when installed.
@@ -324,6 +418,17 @@ def _sec_to_ass(t: float) -> str:
     return f"{h:d}:{m:02d}:{s:05.2f}"
 
 
+def _ass_to_sec(ts: str) -> float:
+    """Parse ASS H:MM:SS.cc (or H:MM:SS.xx) into seconds."""
+    parts = ts.strip().split(":")
+    if len(parts) != 3:
+        return 0.0
+    try:
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    except ValueError:
+        return 0.0
+
+
 def _prepare_caption_text(text: str, language_hint: str) -> str:
     hint = (language_hint or "en").lower().strip()
     # Hinglish must be Roman script — romanize any leftover Devanagari.
@@ -368,19 +473,29 @@ def _style_line(style: dict[str, Any], language_hint: str) -> str:
     bold = -1 if int(style.get("fontWeight") or 700) >= 600 else 0
     outline = max(0, int(round(int(style.get("outlineWidth") or 0) * _ASS_OUTLINE_SCALE)))
     shadow = 3 if style.get("shadow") else 0
-    # BorderStyle 3 = opaque box. libass often ignores alpha and paints a solid black
-    # rectangle, so only enable it for intentional boxed presets (opacity >= 40%).
-    # Low decorative opacities must stay BorderStyle 1 (outline + shadow) like CapCut viral.
-    boxed = bg_opacity >= 0.4
-    border_style = 3 if boxed else 1
-    if boxed:
+    # Capite "box" animation: BorderStyle 3 with transparent default outline so only
+    # the active word paints a pill (via \\3a&H00& override). Classic boxed presets
+    # still use opacity >= 0.4 for full-line opaque boxes.
+    word_box = animation == "box"
+    boxed = (not word_box) and bg_opacity >= 0.4
+    border_style = 3 if (boxed or word_box) else 1
+    if word_box:
+        # Capite pill: BorderStyle 3, but BackColour must be fully transparent
+        # (ASS AA=FF). alpha=0 in _hex_to_ass_bgr means opaque — that baked a
+        # full-width black bar into crimson/box burns.
+        r, g, b = _parse_hex_rgb(highlight)
+        outline_c = f"&HFF{b:02X}{g:02X}{r:02X}"
+        back = "&HFF000000"
+        outline = max(outline, int(round(8 * _ASS_OUTLINE_SCALE)))
+        shadow = 0
+    elif boxed:
         # Opaque box fill; Outline becomes box padding thickness.
         back = _hex_to_ass_bgr(str(style.get("backgroundColor") or "#000000"), alpha=bg_opacity)
         outline = max(outline, 10)  # readable padding around glyphs
         shadow = 0
     else:
         # Shadow colour (not a box). Keep fully opaque so drop-shadow reads cleanly.
-        back = _hex_to_ass_bgr("#000000", alpha=0.0)
+        back = _hex_to_ass_bgr("#000000", alpha=1.0)
     align, margin_v = _alignment_and_margin(str(style.get("position") or "bottom"))
     return (
         f"Style: Default,{font},{size},{primary},{secondary},{outline_c},{back},"
@@ -400,23 +515,136 @@ def _anim_prefix(animation: str) -> str:
 
 def _pop_active_tags(color: str, *, strong: bool = False) -> str:
     """Scale-up the active word, then settle (preview pop / word_pop)."""
-    start = 165 if strong else 145
-    return rf"{{\c{color}\fscx{start}\fscy{start}\t(0,220,\fscx100\fscy100)}}"
+    anim = "word_pop" if strong else "pop"
+    return "{" + active_word_override(anim, highlight_ass_c=color) + "}"
 
 
-def _word_durations(total: float, n: int, *, min_word: float = 0.16) -> list[float]:
-    """Split a cue across words with a readable minimum so highlights track speech."""
+# CapCut / OpusClip style: punchy karaoke locked to spoken pace (~180 WPM).
+_SPEECH_WORD_SEC = 0.28
+_MIN_WORD_SEC = 0.10
+_MAX_WORD_SEC = 0.40
+_LAST_WORD_HOLD = 0.18  # brief linger, then next phrase (not sticky)
+
+
+def _word_durations(total: float, n: int, *, min_word: float = _MIN_WORD_SEC) -> list[float]:
+    """Split a cue across words with CapCut-like clamps (snappy, not crawl)."""
     if n <= 0:
         return []
     if n == 1:
-        return [max(min_word, total)]
-    # Prefer even split, but never go below min_word unless the cue is too short.
+        return [max(min_word, min(total, _MAX_WORD_SEC + _LAST_WORD_HOLD))]
     ideal = total / n
     if ideal >= min_word:
+        each = max(min_word, min(_MAX_WORD_SEC, ideal))
+        if each * n <= total + 1e-6:
+            durs = [each] * n
+            leftover = total - each * n
+            if leftover > 0:
+                durs[-1] = min(durs[-1] + min(leftover, _LAST_WORD_HOLD), total)
+            return durs
         return [ideal] * n
-    # Compress evenly when the cue is short.
     each = max(0.08, total / n)
     return [each] * n
+
+
+def _word_timings(
+    words: list[str],
+    rs: float,
+    re: float,
+    word_times: list[tuple[float, float]] | None = None,
+) -> list[tuple[float, float]]:
+    """CapCut/OpusClip karaoke: realtime with speech, snappy handoff."""
+    if word_times and len(word_times) == len(words):
+        out: list[tuple[float, float]] = []
+        for i, (ws, we) in enumerate(word_times):
+            # Stamps are already lag-compensated by _relative_word_times / synthesize.
+            start = max(rs, float(ws))
+            if i < len(word_times) - 1:
+                end = min(re, max(start + 0.04, float(word_times[i + 1][0]) - 0.01))
+            else:
+                spoken = max(float(we), start + _MIN_WORD_SEC)
+                end = min(re, spoken + _LAST_WORD_HOLD)
+            if end <= start:
+                end = min(re, start + _MIN_WORD_SEC)
+            out.append((start, end))
+        return out
+
+    n = len(words)
+    if n <= 0:
+        return []
+    total = max(0.08, re - rs)
+    natural = n * _SPEECH_WORD_SEC + _LAST_WORD_HOLD
+
+    if total <= natural * 1.15:
+        # Window matches speech — distribute evenly (clamped).
+        durs = _word_durations(total, n)
+    else:
+        # Silence tail — pack at speech rate; don't crawl through dead air.
+        durs = [_SPEECH_WORD_SEC] * n
+        durs[-1] = _SPEECH_WORD_SEC + _LAST_WORD_HOLD
+
+    t = rs
+    out: list[tuple[float, float]] = []
+    for i, dur in enumerate(durs):
+        ws = t
+        we = min(re, t + dur)
+        if i == n - 1:
+            # Brief hold only — CapCut does not pin the last word across silence.
+            we = min(re, max(we, ws + _MIN_WORD_SEC), ws + _MAX_WORD_SEC + _LAST_WORD_HOLD)
+        if we <= ws:
+            we = min(re, ws + _MIN_WORD_SEC)
+        out.append((ws, we))
+        t = we
+    return out
+
+
+def _relative_word_times(
+    seg: TranscriptSegment,
+    chunk_words: list[str],
+    clip_start: float,
+    rs: float,
+    re: float,
+) -> list[tuple[float, float]] | None:
+    """Map segment word stamps onto the current chunk when counts align."""
+    raw = getattr(seg, "words", None) or []
+    if not raw or not chunk_words:
+        return None
+    # Flatten whisper words → (rel_start, rel_end, token)
+    stamped: list[tuple[float, float, str]] = []
+    for w in raw:
+        token = str(getattr(w, "word", None) or (w.get("word") if isinstance(w, dict) else "") or "").strip()
+        if not token:
+            continue
+        try:
+            ws = float(getattr(w, "start", None) if not isinstance(w, dict) else w["start"])
+            we = float(getattr(w, "end", None) if not isinstance(w, dict) else w["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        # Pull forward vs clip so karaoke lands with the spoken audio.
+        stamped.append(
+            (
+                max(0.0, _pull_forward(ws - clip_start)),
+                max(0.0, _pull_forward(we - clip_start)),
+                token,
+            )
+        )
+    if not stamped:
+        return None
+    # If the cue is a multi-chunk slice, try to locate this chunk as a contiguous run.
+    tokens = [t for _, _, t in stamped]
+    n = len(chunk_words)
+    for start_i in range(0, len(tokens) - n + 1):
+        window = tokens[start_i : start_i + n]
+        if [a.lower().strip(".,!?") for a in window] == [
+            b.lower().strip(".,!?") for b in chunk_words
+        ]:
+            return [
+                (max(rs, stamped[start_i + i][0]), min(re, stamped[start_i + i][1]))
+                for i in range(n)
+            ]
+    # Single-chunk segments: use stamps when lengths match.
+    if len(stamped) == n:
+        return [(max(rs, s), min(re, e)) for s, e, _ in stamped]
+    return None
 
 
 def _dialogue_word_steps(
@@ -426,33 +654,55 @@ def _dialogue_word_steps(
     re: float,
     hi: str,
     base: str,
-    accumulate: bool,
-    pop_active: bool,
-    strong_pop: bool = False,
+    animation: str,
+    position: str = "center",
+    accumulate: bool | None = None,
+    word_times: list[tuple[float, float]] | None = None,
 ) -> list[str]:
-    """Emit one ASS dialogue event per word step (color + optional pop on active word)."""
+    """Emit one ASS dialogue event per word step (Capite-style full-line rewrite)."""
+    anim = (animation or "highlight").lower()
+    if accumulate is None:
+        accumulate = anim in ("karaoke", "highlight")
+    # Capite karaoke wipe uses \\kf on the active word only.
+    wipe = anim == "karaoke_wipe"
     out: list[str] = []
-    durs = _word_durations(max(0.08, re - rs), len(words))
-    t = rs
+    timings = _word_timings(words, rs, re, word_times)
+    anchor = pos_tag(position)
     no_wrap = r"{\q2}"
-    for i, dur in enumerate(durs):
-        ws = t
-        we = min(re, t + dur)
-        t = we
+    for i, (ws, we) in enumerate(timings):
         if we <= ws:
             continue
         parts: list[str] = []
         for j, w in enumerate(words):
             is_active = j == i
             lit = (j <= i) if accumulate else is_active
-            color = hi if lit else base
-            if pop_active and is_active:
-                parts.append(f"{_pop_active_tags(color, strong=strong_pop)}{_ass_escape(w)}")
+            if is_active:
+                if wipe:
+                    duration_cs = max(3, int(round((we - ws) * 100)))
+                    tags = f"\\kf{duration_cs}\\c{hi}"
+                else:
+                    # karaoke/highlight: Capite color step + mild Capite pop on the spoken word
+                    engine = (
+                        "pop"
+                        if anim in ("karaoke", "highlight")
+                        else ("word_pop" if anim == "word_pop" else anim)
+                    )
+                    tags = active_word_override(
+                        engine,
+                        highlight_ass_c=hi,
+                        primary_ass_c=base,
+                        box_ass_c=hi,
+                    )
+                # Use plain f-strings (not rf-) so {\\r} becomes the ASS reset tag {\r}.
+                parts.append(f"{{{tags}}}{_ass_escape(w)}{{\\r}}")
+            elif lit and accumulate:
+                parts.append(f"{{\\c{hi}\\fscx100\\fscy100}}{_ass_escape(w)}{{\\r}}")
             else:
-                parts.append(rf"{{\c{color}\fscx100\fscy100}}{_ass_escape(w)}")
+                parts.append(f"{{\\c{base}\\fscx100\\fscy100}}{_ass_escape(w)}{{\\r}}")
+        # Capite: prepend \\pos so overlapping word events never stack vertically.
+        text = f"{{{anchor}}}{no_wrap}{' '.join(parts)}"
         out.append(
-            f"Dialogue: 0,{_sec_to_ass(ws)},{_sec_to_ass(we)},Default,,0,0,0,,"
-            f"{no_wrap}{' '.join(parts)}"
+            f"Dialogue: 0,{_sec_to_ass(ws)},{_sec_to_ass(we)},Default,,0,0,0,,{text}"
         )
     return out
 
@@ -469,6 +719,160 @@ def _norm_caption_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
 
 
+def _token_words(text: str) -> list[str]:
+    return _norm_caption_text(text).lower().split()
+
+
+def _is_rolling_extension(prev: str, nxt: str) -> bool:
+    """True when nxt is a YouTube/ASR rolling update of prev (grow or slide)."""
+    p, n = _token_words(prev), _token_words(nxt)
+    if not p or not n:
+        return False
+    # Growing roll: "small clips" → "small clips of"
+    if len(n) >= len(p) and n[: len(p)] == p:
+        return True
+    # Sliding window: "small clips of this" → "clips of this long"
+    max_k = min(len(p), len(n), 8)
+    for k in range(max_k, 1, -1):
+        if p[-k:] == n[:k]:
+            return True
+    return False
+
+
+# CapCut-style short lines — don't freeze a whole monologue as one cue.
+_MAX_ROLL_DURATION = 2.8
+# YouTube/rolling ASR is typically late vs audio. Pull captions forward so they
+# land as the person speaks (CapCut/OpusClip realtime feel).
+_CAPTION_LEAD = 0.15
+
+
+def _speech_paced_end(start: float, text: str, raw_end: float) -> float:
+    """End near spoken length — snappy like CapCut, not sticky."""
+    n = max(1, len(_token_words(text)))
+    paced = start + n * _SPEECH_WORD_SEC + _LAST_WORD_HOLD
+    soft_cap = paced + 0.22
+    return max(start + 0.22, min(raw_end, soft_cap, start + _MAX_ROLL_DURATION))
+
+
+def _pull_forward(t: float, *, floor: float = 0.0) -> float:
+    """Shift a timestamp earlier by ASR lag compensation."""
+    return max(floor, float(t) - _CAPTION_LEAD)
+
+
+def _words_from_seg(seg: TranscriptSegment) -> list[TranscriptWord] | None:
+    raw = getattr(seg, "words", None) or []
+    if not raw:
+        return None
+    out: list[TranscriptWord] = []
+    for w in raw:
+        if isinstance(w, TranscriptWord):
+            token = (w.word or "").strip()
+            if token:
+                out.append(w)
+            continue
+        if isinstance(w, dict):
+            token = str(w.get("word") or w.get("text") or "").strip()
+            if not token:
+                continue
+            try:
+                out.append(
+                    TranscriptWord(
+                        word=token,
+                        start=float(w["start"]),
+                        end=float(w["end"]),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+    return out or None
+
+
+def _synthesize_roll_words(
+    roll_steps: list[tuple[float, float, str]],
+) -> list[TranscriptWord] | None:
+    """Infer word onset times from YouTube rolling ASR updates.
+
+    Each rolling cue typically adds one or more new trailing words. Using the
+    cue's start as those words' onset keeps karaoke aligned without Whisper.
+    """
+    if not roll_steps:
+        return None
+    stamped: list[TranscriptWord] = []
+    prev_tokens: list[str] = []
+    for start, _end, text in roll_steps:
+        tokens = _norm_caption_text(text).split()
+        if not tokens:
+            continue
+        if not prev_tokens:
+            # First cue: distribute across a short window if no stamps.
+            if len(tokens) == 1:
+                stamped.append(
+                    TranscriptWord(word=tokens[0], start=start, end=start + _SPEECH_WORD_SEC)
+                )
+            else:
+                t = start
+                for tok in tokens:
+                    stamped.append(
+                        TranscriptWord(word=tok, start=t, end=t + _SPEECH_WORD_SEC)
+                    )
+                    t += _SPEECH_WORD_SEC
+            prev_tokens = tokens
+            continue
+        # Growing roll: new trailing words appear at this cue's start.
+        if len(tokens) >= len(prev_tokens) and [
+            x.lower() for x in tokens[: len(prev_tokens)]
+        ] == [x.lower() for x in prev_tokens]:
+            for tok in tokens[len(prev_tokens) :]:
+                stamped.append(
+                    TranscriptWord(
+                        word=tok,
+                        start=start,
+                        end=start + _SPEECH_WORD_SEC,
+                    )
+                )
+            prev_tokens = tokens
+            continue
+        # Sliding window: find overlap and append only novel tokens.
+        max_k = min(len(prev_tokens), len(tokens), 8)
+        overlap = 0
+        for k in range(max_k, 0, -1):
+            if [x.lower() for x in prev_tokens[-k:]] == [
+                x.lower() for x in tokens[:k]
+            ]:
+                overlap = k
+                break
+        novel = tokens[overlap:]
+        # Drop words that slid out of the window from stamped prefix.
+        drop = max(0, len(prev_tokens) - overlap)
+        if drop and stamped:
+            stamped = stamped[drop:]
+        for tok in novel:
+            stamped.append(
+                TranscriptWord(word=tok, start=start, end=start + _SPEECH_WORD_SEC)
+            )
+        prev_tokens = tokens
+    if not stamped:
+        return None
+    # Rolling ASR updates arrive after the word was spoken — pull onsets forward.
+    stamped = [
+        TranscriptWord(
+            word=w.word,
+            start=_pull_forward(w.start),
+            end=max(_pull_forward(w.start) + 0.05, _pull_forward(w.end)),
+        )
+        for w in stamped
+    ]
+    # Chain ends to next word start for continuous karaoke.
+    for i in range(len(stamped) - 1):
+        nxt = stamped[i + 1].start
+        stamped[i] = TranscriptWord(
+            word=stamped[i].word,
+            start=stamped[i].start,
+            end=max(stamped[i].start + 0.05, min(stamped[i].end, nxt)),
+        )
+    return stamped
+
+
 def collapse_rolling_segments(
     segments: list[TranscriptSegment],
 ) -> list[TranscriptSegment]:
@@ -477,8 +881,12 @@ def collapse_rolling_segments(
     ASR captions often stack many short overlapping events (each adding a word).
     Burning them all causes ghosted/stacked text like the 'aapake' bug.
 
-    Rule: any cues that overlap (or sit within 80ms) belong to one utterance —
-    keep the longest text and the full time span, then hard-cut neighbors.
+    Only merge when the next cue is a rolling extension of the current text, and
+    never let a merged group exceed ``_MAX_ROLL_DURATION`` — otherwise an entire
+    monologue collapses into one mega-cue and captions freeze for seconds.
+
+    While merging, synthesize word onset times from each roll step so later words
+    do not appear at the group's earliest start (the main early-caption cause).
     """
     ordered = sorted(
         (s for s in segments if _norm_caption_text(s.text)),
@@ -494,56 +902,125 @@ def collapse_rolling_segments(
         text=_norm_caption_text(ordered[0].text),
         speaker=ordered[0].speaker,
         language=ordered[0].language,
+        words=_words_from_seg(ordered[0]),
     )
+    roll_steps: list[tuple[float, float, str]] = [
+        (ordered[0].start, ordered[0].end, cur.text)
+    ]
+
+    def _finalize_cur() -> TranscriptSegment:
+        # Rolling ASR: synthesize onsets from each update (more accurate than even-split).
+        words = (
+            _synthesize_roll_words(roll_steps)
+            if len(roll_steps) >= 2
+            else _words_from_seg(cur)
+        )
+        if words is None:
+            words = _words_from_seg(cur)
+        # When we have word stamps, start at first word — never earlier than speech.
+        start = cur.start
+        end = cur.end
+        if words:
+            start = max(start, min(w.start for w in words))
+            end = max(end, max(w.end for w in words))
+        end = _speech_paced_end(start, cur.text, end)
+        return TranscriptSegment(
+            start=start,
+            end=end,
+            text=cur.text,
+            speaker=cur.speaker,
+            language=cur.language,
+            words=words,
+        )
+
+    def _flush_and_start(seg: TranscriptSegment, text: str) -> TranscriptSegment:
+        groups.append(_finalize_cur())
+        # Prefer the real speech start; only push forward if the prior cue still overlaps.
+        prior_end = groups[-1].end
+        start = float(seg.start)
+        if start < prior_end:
+            start = prior_end
+        return TranscriptSegment(
+            start=start,
+            end=_speech_paced_end(start, text, max(float(seg.end), start + 0.08)),
+            text=text,
+            speaker=seg.speaker,
+            language=seg.language,
+            words=_words_from_seg(seg),
+        )
 
     for seg in ordered[1:]:
         text = _norm_caption_text(seg.text)
-        # True overlap only (don't glue separate sentences across gaps)
-        if seg.start < cur.end:
-            cur.end = max(cur.end, seg.end, cur.start + 0.08)
-            if len(text) >= len(cur.text):
-                cur = TranscriptSegment(
-                    start=cur.start,
-                    end=cur.end,
-                    text=text,
-                    speaker=seg.speaker or cur.speaker,
-                    language=seg.language or cur.language,
-                )
-            else:
-                cur = TranscriptSegment(
-                    start=cur.start,
-                    end=cur.end,
-                    text=cur.text,
-                    speaker=cur.speaker,
-                    language=cur.language,
-                )
-        else:
-            groups.append(cur)
+        overlaps = seg.start < cur.end
+        roll = overlaps and _is_rolling_extension(cur.text, text)
+        # Use spoken length (not raw ASR end stamps) — YouTube cues often span 2–3s
+        # even for one new word, which falsely tripped the roll-duration cap.
+        candidate_text = text if roll else cur.text
+        would_be_long = (
+            len(_token_words(candidate_text)) * _SPEECH_WORD_SEC + _LAST_WORD_HOLD
+        ) > _MAX_ROLL_DURATION
+
+        if overlaps and roll and not would_be_long:
+            use_text = text if len(text) >= len(cur.text) else cur.text
+            if _is_rolling_extension(cur.text, text) and len(text) >= len(cur.text) - 8:
+                use_text = text
+            # Keep the source end while rolling so later updates still overlap.
+            # Speech-pacing happens only in _finalize_cur.
+            raw_end = max(cur.end, float(seg.end), cur.start + 0.08)
+            next_words = _words_from_seg(seg)
+            roll_steps.append((float(seg.start), float(seg.end), use_text))
             cur = TranscriptSegment(
-                start=seg.start,
-                end=max(seg.end, seg.start + 0.08),
-                text=text,
-                speaker=seg.speaker,
-                language=seg.language,
+                start=cur.start,
+                end=raw_end,
+                text=use_text,
+                speaker=seg.speaker or cur.speaker,
+                language=seg.language or cur.language,
+                words=next_words or cur.words,
             )
-    groups.append(cur)
+        else:
+            cur = _flush_and_start(seg, text)
+            roll_steps = [(float(cur.start), float(cur.end), text)]
+
+    groups.append(_finalize_cur())
 
     # Enforce non-overlap + drop 1-char Indic leftovers
     clean: list[TranscriptSegment] = []
     for seg in groups:
+        words = _words_from_seg(seg)
         if clean and seg.start < clean[-1].end:
+            shift = clean[-1].end - seg.start
+            if words:
+                words = [
+                    TranscriptWord(word=w.word, start=w.start + shift, end=w.end + shift)
+                    for w in words
+                ]
             seg = TranscriptSegment(
                 start=clean[-1].end,
-                end=max(clean[-1].end + 0.06, seg.end),
+                end=max(clean[-1].end + 0.06, seg.end + shift),
                 text=seg.text,
                 speaker=seg.speaker,
                 language=seg.language,
+                words=words,
             )
         if seg.end <= seg.start:
             continue
         if len(seg.text.strip()) <= 1:
             continue
-        clean.append(seg)
+        end = seg.end
+        if not _words_from_seg(seg):
+            end = _speech_paced_end(seg.start, seg.text, seg.end)
+        if end <= seg.start:
+            continue
+        clean.append(
+            TranscriptSegment(
+                start=seg.start,
+                end=end,
+                text=seg.text,
+                speaker=seg.speaker,
+                language=seg.language,
+                words=_words_from_seg(seg),
+            )
+        )
     return clean
 
 
@@ -559,9 +1036,9 @@ def build_ass_subtitles(
     style = resolve_caption_style(preset, caption_settings)
     animation = str(style.get("animation") or "none").lower()
     max_words = int(style.get("maxWordsPerCaption") or 8)
-    # No lead - keep captions exactly in sync with speech
-    lead = 0.0
-    
+    # Exact sync — never pull captions earlier than transcript timestamps.
+    lead = _CAPTION_LEAD
+
     logger.info(
         "Building ASS with preset=%s, animation=%s, fontSize=%s, maxWords=%d",
         preset,
@@ -597,6 +1074,30 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             language_hint,
         )
 
+    # Clip-relative cursor so lead never stacks overlapping dialogue events.
+    next_ok = 0.0
+
+    def _emit(dialogue_lines: list[str]) -> None:
+        nonlocal next_ok
+        for raw in dialogue_lines:
+            # Dialogue: 0,start,end,Default,...
+            parts = raw.split(",", 9)
+            if len(parts) < 10 or not parts[0].startswith("Dialogue:"):
+                lines.append(raw)
+                continue
+            ws = _ass_to_sec(parts[1])
+            we = _ass_to_sec(parts[2])
+            if we <= next_ok:
+                continue
+            if ws < next_ok:
+                ws = next_ok
+            if we <= ws:
+                we = ws + _MIN_WORD_SEC
+            parts[1] = _sec_to_ass(ws)
+            parts[2] = _sec_to_ass(we)
+            lines.append(",".join(parts))
+            next_ok = we
+
     for seg in rel_segments:
         text = _prepare_caption_text(seg.text, language_hint)
         if not text:
@@ -605,18 +1106,41 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if not chunks:
             continue
 
-        seg_start = max(clip_start, seg.start - lead)
+        seg_words = _words_from_seg(seg)
         seg_end = min(clip_end, seg.end)
-        seg_dur = max(0.15, seg_end - seg_start)  # Minimum 150ms per segment
-        chunk_dur = seg_dur / len(chunks)
-        min_chunk_dur = 0.15  # Minimum 150ms per chunk
+        # Always pull the cue start forward vs late ASR — never re-lock to raw w0.
+        if seg_words:
+            w0 = min(w.start for w in seg_words)
+            w1 = max(w.end for w in seg_words)
+            seg_start = max(clip_start, _pull_forward(w0, floor=clip_start))
+            seg_end = max(
+                seg_start + 0.08,
+                min(clip_end, _pull_forward(w1, floor=seg_start) + _LAST_WORD_HOLD),
+            )
+        else:
+            seg_start = max(clip_start, _pull_forward(seg.start, floor=clip_start))
+            n_words = max(1, len(text.split()))
+            paced = n_words * _SPEECH_WORD_SEC + _LAST_WORD_HOLD
+            seg_end = min(seg_end, max(seg_start + 0.22, seg_start + paced))
+        seg_dur = max(0.15, seg_end - seg_start)
+
+        # CapCut/Opus: each phrase is speech-timed; next phrase follows immediately.
+        chunk_word_counts = [max(1, len(c.split())) for c in chunks]
+        t_cursor = seg_start
 
         for ci, chunk in enumerate(chunks):
-            cs = seg_start + ci * chunk_dur
-            ce = min(cs + max(min_chunk_dur, chunk_dur), seg_end)  # Clamp to segment end
+            natural_chunk = chunk_word_counts[ci] * _SPEECH_WORD_SEC + (
+                _LAST_WORD_HOLD if ci == len(chunks) - 1 else 0.04
+            )
+            remaining = max(0.15, seg_end - t_cursor)
+            # Prefer spoken length — never stretch a phrase across dead air.
+            chunk_dur = min(remaining, max(0.15, natural_chunk))
+            cs = t_cursor
+            ce = min(seg_end, cs + chunk_dur)
+            t_cursor = ce
             rs = max(0.0, cs - clip_start)
-            re = max(rs + min_chunk_dur, min(seg_end - clip_start, ce - clip_start))
-            
+            re = max(rs + 0.12, min(seg_end - clip_start, ce - clip_start))
+
             # Skip if duration too short or timing invalid
             if re <= rs or (re - rs) < 0.08:
                 continue
@@ -628,52 +1152,66 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 str(style.get("highlightColor") or style.get("textColor") or "#FFFFFF")
             )
             base_c = _hex_to_ass_c(str(style.get("textColor") or "#FFFFFF"))
+            position = str(style.get("position") or "center")
+            # Prefer whisper word timestamps when present on the segment.
+            word_times = _relative_word_times(seg, words, clip_start, rs, re)
 
             if animation == "word_pop":
                 if not words:
                     continue
                 # One emphatic word at a time — big pop + highlight fill.
-                durs = _word_durations(max(0.08, re - rs), len(words), min_word=0.18)
-                t = rs
-                for w, dur in zip(words, durs):
-                    ws, we = t, min(re, t + dur)
-                    t = we
+                timings = _word_timings(words, rs, re, word_times)
+                anchor = pos_tag(position)
+                batch: list[str] = []
+                for w, (ws, we) in zip(words, timings):
                     if we <= ws:
                         continue
-                    lines.append(
+                    batch.append(
                         f"Dialogue: 0,{_sec_to_ass(ws)},{_sec_to_ass(we)},Default,,0,0,0,,"
-                        f"{no_wrap}{_pop_active_tags(hi, strong=True)}{_ass_escape(w)}"
+                        f"{{{anchor}}}{no_wrap}{_pop_active_tags(hi, strong=True)}{_ass_escape(w)}"
                     )
+                _emit(batch)
                 continue
 
-            if animation in ("karaoke", "pop"):
-                # Multi-word line: color steps word-by-word (engaging) + scale pop on active.
-                # karaoke = accumulate highlights; pop = only the spoken word highlighted.
+            # Capite engines + Shortlio karaoke/pop: full-line rewrite per spoken word.
+            if animation in (
+                "karaoke",
+                "pop",
+                "highlight",
+                "bounce",
+                "glow",
+                "scale",
+                "box",
+                "karaoke_wipe",
+            ):
                 if not words:
                     continue
-                lines.extend(
+                _emit(
                     _dialogue_word_steps(
                         words=words,
                         rs=rs,
                         re=re,
                         hi=hi,
                         base=base_c,
-                        accumulate=(animation == "karaoke"),
-                        pop_active=True,
-                        strong_pop=(animation == "pop"),
+                        animation=animation,
+                        position=position,
+                        accumulate=(animation in ("karaoke", "highlight")),
+                        word_times=word_times,
                     )
                 )
                 continue
 
-            prefix = no_wrap + _anim_prefix(animation)
+            prefix = "{" + pos_tag(position) + "}" + no_wrap + _anim_prefix(animation)
             display = chunk
             if preset == "bold_yellow" or str(style.get("fontFamily")) == "Impact":
                 # Only uppercase Latin — leave Indic/Arabic alone
                 if not any("\u0900" <= ch <= "\u097F" or "\u0600" <= ch <= "\u06FF" for ch in chunk):
                     display = chunk.upper()
-            lines.append(
-                f"Dialogue: 0,{_sec_to_ass(rs)},{_sec_to_ass(re)},Default,,0,0,0,,"
-                f"{prefix}{_ass_escape(display)}"
+            _emit(
+                [
+                    f"Dialogue: 0,{_sec_to_ass(rs)},{_sec_to_ass(re)},Default,,0,0,0,,"
+                    f"{prefix}{_ass_escape(display)}"
+                ]
             )
 
     return "\n".join(lines)

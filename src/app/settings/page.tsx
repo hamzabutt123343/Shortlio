@@ -56,9 +56,11 @@ export default function SettingsPage() {
   }
 
   return (
-    <AppShell planLabel={plan === "pro" ? "Pro" : "Free"}>
+    <AppShell planLabel={plan === "pro" ? "Pro" : "Free"} title="Settings">
       <div className="mx-auto max-w-xl space-y-6">
-        <h1 className="font-[family-name:var(--font-display)] text-3xl font-bold">Settings</h1>
+        <h1 className="font-[family-name:var(--font-display)] text-3xl font-bold tracking-tight">
+          Settings
+        </h1>
         <Card>
           <form onSubmit={saveProfile} className="space-y-4">
             <div>

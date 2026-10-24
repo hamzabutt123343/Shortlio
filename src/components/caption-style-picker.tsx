@@ -28,8 +28,6 @@ type Props = {
   onPresetChange: (id: string) => void;
   onLanguageChange?: (lang: string) => void;
   onSettingsChange?: (settings: CaptionSettings) => void;
-  /** Fired after a grid preset is applied (mode=preset, fine-tune cleared). */
-  onPresetApplied?: (id: string, settings: CaptionSettings) => void;
   /** compact = project create; full = editor with more controls */
   density?: "compact" | "full";
   className?: string;
@@ -42,7 +40,6 @@ export function CaptionStylePicker({
   onPresetChange,
   onLanguageChange,
   onSettingsChange,
-  onPresetApplied,
   density = "full",
   className,
 }: Props) {
@@ -65,19 +62,16 @@ export function CaptionStylePicker({
   }
 
   function selectPreset(id: string) {
-    // Preset has highest priority: clear fine-tune overrides and mark mode=preset.
+    // Preview only — never auto-save / re-render. Parent must call Save & re-render.
     const next = settingsForPresetMode();
     onPresetChange(id);
     onSettingsChange?.(next);
-    onPresetApplied?.(id, next);
     setShowTune(true);
   }
 
   function resetToPreset() {
     if (!onSettingsChange) return;
-    const next = settingsForPresetMode();
-    onSettingsChange(next);
-    onPresetApplied?.(presetId, next);
+    onSettingsChange(settingsForPresetMode());
   }
 
   return (
@@ -88,7 +82,7 @@ export function CaptionStylePicker({
             Caption style
           </p>
           <p className="mt-0.5 text-sm text-[var(--text-muted)]">
-            Click a preset to apply it immediately (highest priority). Fine-tune only when you want custom overrides.
+            Click a preset to preview it (clears fine-tune like position). Use Save &amp; re-render to burn into the MP4.
           </p>
           <p className="mt-1 text-xs text-[var(--text-muted)]">
             Active source:{" "}
@@ -574,7 +568,11 @@ function AnimatedCaptionText({
   useEffect(() => {
     if (!full || words.length === 0 || synced || style.animation === "none") return;
     const ms =
-      style.animation === "word_pop" ? 700 : style.animation === "karaoke" ? 450 : 1200;
+      style.animation === "word_pop"
+        ? 700
+        : style.animation === "karaoke" || style.animation === "highlight"
+          ? 450
+          : 900;
     const id = setInterval(() => {
       setAnimActive((i) => (i + 1) % Math.max(words.length, 1));
       setTick((t) => t + 1);
@@ -599,6 +597,22 @@ function AnimatedCaptionText({
   }
 
   const activeWord = active % Math.max(words.length, 1);
+  const accumulate =
+    style.animation === "karaoke" || style.animation === "highlight";
+  const activeClass =
+    style.animation === "bounce"
+      ? "caption-word-active-bounce"
+      : style.animation === "glow"
+        ? "caption-word-active-glow"
+        : style.animation === "scale"
+          ? "caption-word-active-scale"
+          : style.animation === "box"
+            ? "caption-word-active-box"
+            : style.animation === "pop" || style.animation === "highlight"
+              ? "caption-word-active-pop"
+              : style.animation === "karaoke"
+                ? "caption-word-active-highlight"
+                : null;
 
   return (
     <p
@@ -619,9 +633,9 @@ function AnimatedCaptionText({
       dir={languageDir(language)}
     >
       {words.map((word, i) => {
-        // karaoke: colors accumulate; pop: only the spoken word lights up
+        // karaoke/highlight: colors accumulate; others: only the spoken word lights up
         const highlighted =
-          style.animation === "karaoke"
+          accumulate
             ? i <= activeWord
             : style.animation === "none"
               ? false
@@ -633,11 +647,15 @@ function AnimatedCaptionText({
             <span
               className={cn(
                 isActive && style.animation === "pop" && playing && "caption-anim-word-pop",
+                isActive && activeClass,
               )}
               style={{
                 color: highlighted ? style.highlightColor : style.textColor,
                 display: "inline-block",
                 transition: "color 80ms ease",
+                ...(isActive && style.animation === "box"
+                  ? { backgroundColor: style.highlightColor, color: style.textColor }
+                  : {}),
               }}
             >
               {word}

@@ -36,6 +36,7 @@ export default async function ProjectPage({ params }: Props) {
           ? "Pro · unlimited (fair use)"
           : `Free · ${usage.remaining}/${usage.limit} clips left today`
       }
+      title={project.source_title || "Project"}
     >
       <div className="mx-auto max-w-5xl">
         <ProjectLive

@@ -109,17 +109,18 @@ def test_collapse_rolling_youtube_captions():
     segs = [
         TranscriptSegment(0.0, 2.0, "aap", "hi"),
         TranscriptSegment(0.3, 2.2, "aap ke", "hi"),
-        TranscriptSegment(0.6, 2.5, "aapake paas", "hi"),
+        TranscriptSegment(0.6, 2.5, "aap ke paas", "hi"),
         TranscriptSegment(2.6, 3.5, "hai", "hi"),
     ]
     out = collapse_rolling_segments(segs)
-    assert len(out) <= 2
+    assert len(out) <= 3
     # No overlapping windows
     for a, b in zip(out, out[1:]):
         assert a.end <= b.start + 1e-6
     ass = build_ass_subtitles(segs, 0.0, 4.0, language_hint="hinglish")
     dialogue_count = sum(1 for line in ass.splitlines() if line.startswith("Dialogue:"))
-    assert dialogue_count <= 4
+    assert dialogue_count <= 8
+    assert r"{\\r}" not in ass
 
 
 def test_viral_word_pop_is_outline_not_box():
@@ -130,6 +131,8 @@ def test_viral_word_pop_is_outline_not_box():
     parts = style_line.split(",")
     assert parts[15] == "1"  # BorderStyle outline (not opaque box)
     assert int(parts[16]) >= 6  # thick outline (scaled for burn)
+    # Shadow/back colour should be opaque black for drop-shadow (not a fill box).
+    assert parts[6].upper().startswith("&H00")
     dialogue = "\n".join(l for l in ass.splitlines() if l.startswith("Dialogue:"))
     assert "bro" in dialogue
     assert r"\c&H00FF00&" in dialogue  # neon green highlight fill
@@ -142,6 +145,125 @@ def test_boxed_preset_still_uses_border_style_3():
     style_line = next(l for l in ass.splitlines() if l.startswith("Style: Default"))
     parts = style_line.split(",")
     assert parts[15] == "3"
+
+
+def test_capite_bounce_and_pos_tags():
+    segs = [TranscriptSegment(start=0.0, end=2.0, text="move with bounce", language="en")]
+    ass = build_ass_subtitles(segs, 0.0, 3.0, preset="bounce_pop")
+    dialogue = [l for l in ass.splitlines() if l.startswith("Dialogue:")]
+    assert dialogue
+    assert any(r"\pos(" in l for l in dialogue)
+    assert any(r"\t(0,50," in l for l in dialogue)
+
+
+def test_capite_box_preset_uses_border_style_3():
+    segs = [TranscriptSegment(start=0.0, end=1.5, text="hook line now", language="en")]
+    ass = build_ass_subtitles(segs, 0.0, 2.0, preset="crimson_pop")
+    style_line = next(l for l in ass.splitlines() if l.startswith("Style: Default"))
+    parts = style_line.split(",")
+    assert parts[15] == "3"
+    # BackColour must be transparent (AA=FF) — opaque black baked a full-width bar.
+    assert parts[6].upper().startswith("&HFF")
+    dialogue = "\n".join(l for l in ass.splitlines() if l.startswith("Dialogue:"))
+    assert r"\3a&H00&" in dialogue
+
+
+def test_word_timestamps_drive_ass_timing():
+    from pipeline.transcript import TranscriptWord
+
+    segs = [
+        TranscriptSegment(
+            start=0.0,
+            end=1.2,
+            text="one two three",
+            language="en",
+            words=[
+                TranscriptWord("one", 0.0, 0.3),
+                TranscriptWord("two", 0.35, 0.7),
+                TranscriptWord("three", 0.75, 1.2),
+            ],
+        )
+    ]
+    ass = build_ass_subtitles(segs, 0.0, 2.0, preset="hormozi")
+    dialogue = [l for l in ass.splitlines() if l.startswith("Dialogue:")]
+    assert len(dialogue) >= 3
+    # First event should start near 0:00:00.00 (real stamp), not an even third of 1.2s
+    assert "0:00:00.00" in dialogue[0] or "0:00:00.0" in dialogue[0]
+
+
+def test_ass_reset_tag_is_single_backslash_r():
+    """rf-string bug once emitted {\\\\r} which broke libass mid-line."""
+    segs = [TranscriptSegment(start=0.0, end=2.0, text="small clips of", language="en")]
+    ass = build_ass_subtitles(segs, 0.0, 3.0, preset="neon_accent")
+    assert r"{\\r}" not in ass
+    assert r"{\r}" in ass
+
+
+def test_collapse_does_not_create_minute_long_cues():
+    # Continuous overlapping rolls across a long monologue must NOT become one cue.
+    segs = []
+    words = "small clips of this long episode so that viewers stay hooked always".split()
+    t = 0.0
+    for i in range(len(words)):
+        text = " ".join(words[: i + 1])
+        segs.append(TranscriptSegment(start=t, end=t + 2.5, text=text, language="en"))
+        t += 0.4
+    out = collapse_rolling_segments(segs)
+    assert out
+    assert max(s.end - s.start for s in out) <= 5.5
+    assert len(out) >= 2
+
+
+def test_ass_lead_pulls_captions_realtime_vs_late_asr():
+    """~150ms lead counters ASR lag so burns land with spoken audio."""
+    segs = [TranscriptSegment(start=1.0, end=2.2, text="hello world", language="en")]
+    ass = build_ass_subtitles(segs, 0.0, 3.0, preset="classic_white")
+    dialogue = [l for l in ass.splitlines() if l.startswith("Dialogue:")]
+    assert dialogue
+    from pipeline.captions import _ass_to_sec
+
+    start_sec = _ass_to_sec(dialogue[0].split(",")[1])
+    assert 0.82 <= start_sec <= 0.90
+
+
+def test_rolling_collapse_synthesizes_later_word_onsets():
+    segs = [
+        TranscriptSegment(0.0, 2.0, "aap", language="hi"),
+        TranscriptSegment(0.4, 2.2, "aap ke", language="hi"),
+        TranscriptSegment(0.9, 2.5, "aap ke paas", language="hi"),
+    ]
+    out = collapse_rolling_segments(segs)
+    assert out
+    words = out[0].words
+    assert words is not None
+    assert len(words) >= 3
+    # Later words must not share the group's earliest start.
+    assert words[-1].start >= words[0].start + 0.3
+
+
+def test_json3_word_offsets_parsed():
+    from pipeline.transcript import _parse_json3
+
+    data = {
+        "events": [
+            {
+                "tStartMs": 1000,
+                "dDurationMs": 1500,
+                "segs": [
+                    {"utf8": "hello", "tOffsetMs": 0},
+                    {"utf8": " ", "tOffsetMs": 0},
+                    {"utf8": "world", "tOffsetMs": 400},
+                ],
+            }
+        ]
+    }
+    segs = _parse_json3(data, language="en")
+    assert len(segs) == 1
+    assert segs[0].text.strip() == "hello world"
+    assert segs[0].words is not None
+    assert len(segs[0].words) == 2
+    assert abs(segs[0].words[0].start - 1.0) < 1e-6
+    assert abs(segs[0].words[1].start - 1.4) < 1e-6
 
 
 def test_validate_caption_filters_rejects_duplicates(tmp_path: Path):

@@ -8,6 +8,8 @@ import {
 import { Badge, Button, Card, Input, Label } from "@/components/ui";
 import {
   activeCaptionAt,
+  captionStyleKey,
+  DEFAULT_SEGMENT_PAD_SECONDS,
   collapseRollingCues,
   getCaptionStyleMode,
   resolveCaptionStyle,
@@ -16,7 +18,22 @@ import {
   type PreviewCue,
 } from "@/lib/captions/style";
 import { transformCaptionTextDetailed } from "@/lib/captions/transform";
+import {
+  FIT_MODE_OPTIONS,
+  FRAMING_OPTIONS,
+  STACK_DIRECTION_OPTIONS,
+  cropSettingsForFramingMode,
+  fitModeFromCropSettings,
+  framingModeFromCropSettings,
+  panelRatioFromCropSettings,
+  stackDirectionFromCropSettings,
+  type FitMode,
+  type FramingMode,
+  type StackDirection,
+} from "@/lib/framing";
+import { ViralMetadataPanel } from "@/components/viral-metadata-panel";
 import type { Clip } from "@/lib/types";
+import type { ViralMetadata } from "@/lib/viral-metadata/types";
 
 type TranscriptRow = {
   start_time: number;
@@ -25,35 +42,20 @@ type TranscriptRow = {
   language?: string | null;
 };
 
-type CropSettingsState = {
-  focal_x: number;
-  mode: "auto" | "manual_override";
-  speaker_focus: boolean;
-  tracking_mode: "hard_cut" | "subject";
-};
-
 function settingsEqual(a: CaptionSettings, b: CaptionSettings) {
   return JSON.stringify(a ?? {}) === JSON.stringify(b ?? {});
 }
 
-function readCropSettings(raw: unknown): CropSettingsState {
+function readCropSettings(raw: unknown) {
   const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const focal = typeof obj.focal_x === "number" ? obj.focal_x : Number(obj.focal_x ?? 0.5);
-  const mode = obj.mode === "manual_override" || obj.mode === "manual" ? "manual_override" : "auto";
-  const speakerFocus =
-    obj.speaker_focus === undefined && obj.smart_speaker_switch === undefined
-      ? true
-      : Boolean(obj.speaker_focus ?? obj.smart_speaker_switch);
-  const tracking =
-    obj.tracking_mode === "subject" || obj.tracking_mode === "smooth"
-      ? "subject"
-      : "hard_cut";
-  return {
-    focal_x: Number.isFinite(focal) ? focal : 0.5,
-    mode,
-    speaker_focus: speakerFocus,
-    tracking_mode: tracking,
-  };
+  const fx = Number.isFinite(focal) ? focal : 0.5;
+  const mode = framingModeFromCropSettings(obj);
+  return cropSettingsForFramingMode(mode, fx, {
+    stackDirection: stackDirectionFromCropSettings(obj),
+    panelRatio: panelRatioFromCropSettings(obj),
+    fitMode: fitModeFromCropSettings(obj, mode),
+  });
 }
 
 export function ClipEditor({
@@ -88,14 +90,21 @@ export function ClipEditor({
   const [outputFormat, setOutputFormat] = useState(initialClip.output_format);
   const [quality, setQuality] = useState(initialClip.quality);
   const [focalX, setFocalX] = useState(String(initialCrop.focal_x));
-  const [framingMode, setFramingMode] = useState<"smart_auto" | "speaker_cuts" | "single_subject" | "static">(
-    initialCrop.mode === "manual_override"
-      ? "static"
-      : initialCrop.speaker_focus
-        ? "speaker_cuts"
-        : initialCrop.tracking_mode === "subject"
-          ? "single_subject"
-          : "smart_auto",
+  const [framingMode, setFramingMode] = useState<FramingMode>(() =>
+    framingModeFromCropSettings(initialClip.crop_settings as Record<string, unknown>),
+  );
+  const cropRaw = initialClip.crop_settings as Record<string, unknown>;
+  const [stackDirection, setStackDirection] = useState<StackDirection>(() =>
+    stackDirectionFromCropSettings(cropRaw),
+  );
+  const [panelRatio, setPanelRatio] = useState(() =>
+    String(panelRatioFromCropSettings(cropRaw)),
+  );
+  const [fitMode, setFitMode] = useState<FitMode>(() =>
+    fitModeFromCropSettings(
+      cropRaw,
+      framingModeFromCropSettings(cropRaw),
+    ),
   );
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -103,10 +112,22 @@ export function ClipEditor({
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const playerShellRef = useRef<HTMLDivElement | null>(null);
+  const prevRenderStatus = useRef(initialClip.render_status);
+  // What is actually painted in the current MP4 (survives Save without re-render).
+  const [burnedSnapshot, setBurnedSnapshot] = useState(() => ({
+    preset: initialClip.caption_preset,
+    settings: (initialClip.caption_settings as CaptionSettings) ?? {},
+    language: initialClip.caption_language,
+  }));
 
   const style = useMemo(
     () => resolveCaptionStyle(captionPreset, captionSettings),
     [captionPreset, captionSettings],
+  );
+  const burnedStyle = useMemo(
+    () => resolveCaptionStyle(burnedSnapshot.preset, burnedSnapshot.settings),
+    [burnedSnapshot],
   );
 
   const styleDirty = useMemo(() => {
@@ -128,6 +149,15 @@ export function ClipEditor({
     clip.burn_captions,
   ]);
 
+  // Preview matches the file only when the burn snapshot equals the live style.
+  // Save-without-re-render must NOT flip this to true (that caused duplicate/wrong position).
+  const exportMatchesPreview =
+    burnCaptions &&
+    clip.render_status === "ready" &&
+    Boolean(signedUrl) &&
+    captionLanguage === burnedSnapshot.language &&
+    captionStyleKey(style) === captionStyleKey(burnedStyle);
+
   const languagePreview = useMemo(() => {
     const sourceLang = transcript[0]?.language || "en";
     const sample = transcript.find((s) => s.text?.trim())?.text ?? "";
@@ -137,7 +167,7 @@ export function ClipEditor({
 
   const cues: PreviewCue[] = useMemo(() => {
     const start = Number(startTime) || clip.start_time;
-    const pad = 1.5;
+    const pad = DEFAULT_SEGMENT_PAD_SECONDS;
     const sourceLang = transcript[0]?.language || "en";
     const raw = transcript
       .filter(
@@ -187,27 +217,13 @@ export function ClipEditor({
 
   const overlayText = overlayCaption?.text ?? null;
 
-  // ONE caption renderer only:
-  // - Export matches current settings → show burned MP4 captions only
-  // - Otherwise → show live HTML overlay only (mask any burned pixels)
-  const exportMatchesPreview =
-    !styleDirty && burnCaptions && clip.render_status === "ready" && Boolean(signedUrl);
+  // Live overlay whenever the on-disk burn does not match the editor style.
   const showLiveOverlay =
     !exportMatchesPreview &&
-    (Boolean(overlayText?.trim()) || (!transcript.length && styleDirty));
-  // Hide burned pixels whenever the live overlay is the active renderer
-  // (includes mid-re-render, when the signed URL still has the old burn).
-  const videoMayHaveBurns =
-    Boolean(signedUrl) && Boolean(clip.burn_captions) && clip.render_status !== "failed";
-  const maskBurnedCaptions = showLiveOverlay && videoMayHaveBurns;
-  const renderedStyle = useMemo(
-    () =>
-      resolveCaptionStyle(
-        clip.caption_preset,
-        (clip.caption_settings as CaptionSettings) ?? {},
-      ),
-    [clip.caption_preset, clip.caption_settings],
-  );
+    (Boolean(overlayText?.trim()) || !transcript.length);
+  // Soft-cover the burned caption band so live preview is not doubled.
+  const hideBurnedCaptions =
+    showLiveOverlay && Boolean(signedUrl) && Boolean(clip.burn_captions);
 
   useEffect(() => {
     if (clip.render_status !== "rendering" && clip.render_status !== "pending") return;
@@ -221,6 +237,26 @@ export function ClipEditor({
     }, 3000);
     return () => clearInterval(id);
   }, [clip.id, clip.render_status]);
+
+  // After a re-render finishes, the new MP4 matches the clip's saved caption style.
+  useEffect(() => {
+    const prev = prevRenderStatus.current;
+    prevRenderStatus.current = clip.render_status;
+    const finished =
+      (prev === "rendering" || prev === "pending") && clip.render_status === "ready";
+    if (!finished || !signedUrl) return;
+    setBurnedSnapshot({
+      preset: clip.caption_preset,
+      settings: (clip.caption_settings as CaptionSettings) ?? {},
+      language: clip.caption_language,
+    });
+  }, [
+    clip.render_status,
+    signedUrl,
+    clip.caption_preset,
+    clip.caption_settings,
+    clip.caption_language,
+  ]);
 
   useEffect(() => {
     if (transcript.length) return;
@@ -244,44 +280,15 @@ export function ClipEditor({
     return () => cancelAnimationFrame(raf);
   }, [signedUrl]);
 
-  function buildCropSettings(): CropSettingsState {
+  function buildCropSettings() {
     const fx = Number(focalX);
     const validFocal = Number.isFinite(fx) && fx >= 0 && fx <= 1;
-    
-    if (framingMode === "static" && validFocal) {
-      return {
-        focal_x: fx,
-        mode: "manual_override",
-        speaker_focus: false,
-        tracking_mode: "hard_cut",
-      };
-    }
-    
-    if (framingMode === "speaker_cuts") {
-      return {
-        focal_x: validFocal ? fx : 0.5,
-        mode: "auto",
-        speaker_focus: true,
-        tracking_mode: "hard_cut",
-      };
-    }
-    
-    if (framingMode === "single_subject") {
-      return {
-        focal_x: validFocal ? fx : 0.5,
-        mode: "auto",
-        speaker_focus: false,
-        tracking_mode: "subject",
-      };
-    }
-    
-    // smart_auto or fallback
-    return {
-      focal_x: validFocal ? fx : 0.5,
-      mode: "auto",
-      speaker_focus: true,
-      tracking_mode: "hard_cut",
-    };
+    const pr = Number(panelRatio);
+    return cropSettingsForFramingMode(framingMode, validFocal ? fx : 0.5, {
+      stackDirection,
+      panelRatio: Number.isFinite(pr) ? pr : 0.5,
+      fitMode,
+    });
   }
 
   async function save(
@@ -333,13 +340,6 @@ export function ClipEditor({
     }
   }
 
-  /** Grid preset click: apply immediately (mode=preset) and burn into the next export. */
-  function handlePresetApplied(id: string, settings: CaptionSettings) {
-    setCaptionPreset(id);
-    setCaptionSettings(settings);
-    void save(true, { captionPreset: id, captionSettings: settings });
-  }
-
   async function download() {
     setError(null);
     const res = await fetch(`/api/clips/${clip.id}/download`);
@@ -370,13 +370,18 @@ export function ClipEditor({
             {clip.render_status}
           </Badge>
         </div>
-        <div className="relative aspect-[9/16] max-h-[640px] overflow-hidden rounded-[12px] border border-[var(--border)] bg-black">
+        <div
+          ref={playerShellRef}
+          className="relative aspect-[9/16] max-h-[640px] overflow-hidden rounded-[12px] border border-[var(--border)] bg-black"
+        >
           {signedUrl ? (
             <video
               ref={videoRef}
               key={signedUrl}
               src={signedUrl}
               controls
+              // Keep live overlay in sync — native video fullscreen would drop the HTML layer.
+              controlsList="nofullscreen"
               className="h-full w-full object-contain"
               onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
               onPlay={() => setPlaying(true)}
@@ -394,15 +399,24 @@ export function ClipEditor({
               Preview unavailable until render completes
             </div>
           )}
-          {maskBurnedCaptions && (
+          {hideBurnedCaptions && (
             <div
               className={
-                renderedStyle.position === "top"
-                  ? "pointer-events-none absolute inset-x-0 top-0 h-[32%] bg-black"
-                  : renderedStyle.position === "center"
-                    ? "pointer-events-none absolute inset-x-0 top-[28%] h-[36%] bg-black"
-                    : "pointer-events-none absolute inset-x-0 bottom-0 h-[38%] bg-black"
+                burnedStyle.position === "top"
+                  ? "pointer-events-none absolute inset-x-[6%] top-[8%] h-[14%]"
+                  : burnedStyle.position === "center"
+                    ? "pointer-events-none absolute inset-x-[6%] top-1/2 h-[14%] -translate-y-1/2"
+                    : "pointer-events-none absolute inset-x-[6%] bottom-[12%] h-[14%]"
               }
+              style={{
+                // Soft frost only — no dark fill (that read as a black bar).
+                backdropFilter: "blur(10px)",
+                WebkitBackdropFilter: "blur(10px)",
+                maskImage:
+                  "linear-gradient(to bottom, transparent, black 22%, black 78%, transparent)",
+                WebkitMaskImage:
+                  "linear-gradient(to bottom, transparent, black 22%, black 78%, transparent)",
+              }}
               aria-hidden
             />
           )}
@@ -417,19 +431,40 @@ export function ClipEditor({
                   : undefined
               }
               playing={playing}
-              sampleFallback={!transcript.length && styleDirty}
+              sampleFallback={!transcript.length && (styleDirty || !exportMatchesPreview)}
             />
+          )}
+          {signedUrl && (
+            <button
+              type="button"
+              className="absolute right-2 top-2 z-[2] rounded-md border border-white/20 bg-black/55 px-2 py-1 text-[11px] font-medium text-white/90 hover:bg-black/75"
+              onClick={() => {
+                const el = playerShellRef.current;
+                if (!el) return;
+                if (document.fullscreenElement === el) {
+                  void document.exitFullscreen();
+                } else {
+                  void el.requestFullscreen();
+                }
+              }}
+            >
+              Full screen
+            </button>
           )}
         </div>
         <p className="mt-2 text-xs text-[var(--text-muted)]">
           {exportMatchesPreview
             ? "Showing exported captions (preview matches download)."
             : overlayText
-              ? "Live captions update instantly. Save & re-render to burn this style into the MP4."
+              ? "Live preview — Save & re-render to burn this style into the MP4."
               : transcript.length
                 ? "Waiting for speech in this part of the clip…"
                 : "Loading transcript for captions…"}
-          {styleDirty ? " Style changes are unsaved for export." : ""}
+          {styleDirty
+            ? " Unsaved editor changes."
+            : !exportMatchesPreview && burnCaptions
+              ? " Saved style differs from the current MP4 burn."
+              : ""}
         </p>
         {clip.reframe_warning && (
           <p className="mt-3 text-sm text-[var(--warning)]">
@@ -462,7 +497,6 @@ export function ClipEditor({
             onPresetChange={setCaptionPreset}
             onLanguageChange={setCaptionLanguage}
             onSettingsChange={setCaptionSettings}
-            onPresetApplied={handlePresetApplied}
             density="full"
           />
 
@@ -504,32 +538,26 @@ export function ClipEditor({
                 id="framing-mode"
                 className="mt-1 w-full rounded-[10px] border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm"
                 value={framingMode}
-                onChange={(e) =>
-                  setFramingMode(
-                    e.target.value as "smart_auto" | "speaker_cuts" | "single_subject" | "static",
-                  )
-                }
+                onChange={(e) => setFramingMode(e.target.value as FramingMode)}
               >
-                <option value="smart_auto">Smart Auto (recommended)</option>
-                <option value="speaker_cuts">Active Speaker Cuts</option>
-                <option value="single_subject">Single Subject Tracking</option>
-                <option value="static">Static Position</option>
+                {FRAMING_OPTIONS.map((opt) => (
+                  <option key={opt.id} value={opt.id}>
+                    {opt.label}
+                  </option>
+                ))}
               </select>
               <p className="mt-1.5 text-xs text-[var(--text-muted)]">
-                {framingMode === "smart_auto" &&
-                  "Automatically detects speakers and cuts instantly between them. Best for podcasts and interviews."}
-                {framingMode === "speaker_cuts" &&
-                  "Hard cuts between speakers with no panning. OpusClip-style instant transitions."}
-                {framingMode === "single_subject" &&
-                  "Smooth tracking of a single person or subject. Good for solo videos, gaming, IRL streams."}
-                {framingMode === "static" &&
-                  "Fixed crop position (set Focal X below). No automatic movement."}
+                {FRAMING_OPTIONS.find((o) => o.id === framingMode)?.description}
               </p>
             </div>
 
-            {framingMode === "static" && (
+            {(framingMode === "static" || framingMode === "reaction_stack") && (
               <div>
-                <Label htmlFor="focal">Focal X position (0 = left, 1 = right)</Label>
+                <Label htmlFor="focal">
+                  {framingMode === "reaction_stack"
+                    ? "Reactor side (0 = left, 1 = right)"
+                    : "Focal X position (0 = left, 1 = right)"}
+                </Label>
                 <Input
                   id="focal"
                   type="number"
@@ -540,11 +568,81 @@ export function ClipEditor({
                   onChange={(e) => setFocalX(e.target.value)}
                 />
                 <p className="mt-1 text-xs text-[var(--text-muted)]">
-                  0.5 = center. Adjust left/right to frame your subject.
+                  {framingMode === "reaction_stack"
+                    ? "Which side of the source the reactor is on."
+                    : "0.5 = center. Adjust left/right to frame your subject."}
                 </p>
               </div>
             )}
+
+            {(framingMode === "reaction_stack" || framingMode === "split_stack") && (
+              <>
+                <div>
+                  <Label htmlFor="stack-direction">Panel layout</Label>
+                  <select
+                    id="stack-direction"
+                    className="mt-1 w-full rounded-[10px] border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm"
+                    value={stackDirection}
+                    onChange={(e) => setStackDirection(e.target.value as StackDirection)}
+                  >
+                    {STACK_DIRECTION_OPTIONS.map((opt) => (
+                      <option key={opt.id} value={opt.id}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <Label htmlFor="panel-ratio">
+                    Primary panel size ({Math.round(Number(panelRatio) * 100) || 50}%)
+                  </Label>
+                  <input
+                    id="panel-ratio"
+                    type="range"
+                    min={0.25}
+                    max={0.75}
+                    step={0.05}
+                    value={panelRatio}
+                    onChange={(e) => setPanelRatio(e.target.value)}
+                    className="mt-2 w-full"
+                  />
+                  <p className="mt-1 text-xs text-[var(--text-muted)]">
+                    Share of the canvas for the reactor / primary speaker panel.
+                  </p>
+                </div>
+                <div>
+                  <Label htmlFor="fit-mode">Panel fit</Label>
+                  <select
+                    id="fit-mode"
+                    className="mt-1 w-full rounded-[10px] border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm"
+                    value={fitMode}
+                    onChange={(e) => setFitMode(e.target.value as FitMode)}
+                  >
+                    {FIT_MODE_OPTIONS.map((opt) => (
+                      <option key={opt.id} value={opt.id}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-1.5 text-xs text-[var(--text-muted)]">
+                    {FIT_MODE_OPTIONS.find((o) => o.id === fitMode)?.description}
+                  </p>
+                </div>
+              </>
+            )}
           </div>
+
+          <ViralMetadataPanel
+            clipId={clip.id}
+            initial={clip.viral_metadata}
+            language={captionLanguage}
+            onSaved={(meta: ViralMetadata) => {
+              setClip((prev) => ({
+                ...prev,
+                viral_metadata: meta as unknown as Record<string, unknown>,
+              }));
+            }}
+          />
 
           <label className="flex items-center gap-2 text-sm">
             <input

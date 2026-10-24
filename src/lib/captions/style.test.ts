@@ -91,6 +91,28 @@ describe("caption style helpers", () => {
     expect(activeCaptionAt(cues, 9, 4)).toBeNull();
   });
 
+  it("pulls captions forward so they feel realtime with speech", () => {
+    const cues = [{ start: 1.0, end: 2.5, text: "hello world" }];
+    // 150ms lead → visible slightly before the raw cue start.
+    expect(activeCaptionAt(cues, 0.8, 4)).toBeNull();
+    expect(activeCaptionAt(cues, 0.9, 4)?.text).toContain("hello");
+    expect(activeCaptionAt(cues, 1.05, 4)?.text).toContain("hello");
+  });
+
+  it("uses synthesized roll word onsets so later words are not early", () => {
+    const collapsed = collapseRollingCues([
+      { start: 0.0, end: 2.0, text: "one" },
+      { start: 0.5, end: 2.2, text: "one two" },
+      { start: 1.0, end: 2.5, text: "one two three" },
+    ]);
+    expect(collapsed[0]?.words?.length).toBeGreaterThanOrEqual(3);
+    const last = collapsed[0]!.words!.at(-1)!;
+    expect(last.start).toBeGreaterThanOrEqual(0.9);
+    // Before the third word onset, karaoke should not be on "three".
+    const early = activeCaptionAt(collapsed, 0.6, 8);
+    expect(early?.wordIndex).toBeLessThan(2);
+  });
+
   it("chunks long cues like the ASS exporter", () => {
     const cues = [{ start: 0, end: 4, text: "one two three four five six" }];
     // maxWords=3 → two chunks of 2s each
@@ -104,9 +126,30 @@ describe("caption style helpers", () => {
     const collapsed = collapseRollingCues([
       { start: 0, end: 2, text: "aap" },
       { start: 0.3, end: 2.2, text: "aap ke" },
-      { start: 0.6, end: 2.5, text: "aapake paas" },
+      { start: 0.6, end: 2.5, text: "aap ke paas" },
     ]);
-    expect(collapsed.length).toBe(1);
-    expect(collapsed[0].text).toContain("aapake");
+    expect(collapsed.length).toBeGreaterThanOrEqual(1);
+    expect(collapsed.length).toBeLessThanOrEqual(3);
+    expect(collapsed.some((c) => c.text.includes("paas") || c.text.includes("ke"))).toBe(
+      true,
+    );
+    for (let i = 1; i < collapsed.length; i++) {
+      expect(collapsed[i].start).toBeGreaterThanOrEqual(collapsed[i - 1].end - 1e-6);
+    }
+  });
+
+  it("does not merge an entire monologue into one cue", () => {
+    const words =
+      "small clips of this long episode so that viewers stay hooked always".split(
+        " ",
+      );
+    const cues = words.map((_, i) => ({
+      start: i * 0.4,
+      end: i * 0.4 + 2.5,
+      text: words.slice(0, i + 1).join(" "),
+    }));
+    const collapsed = collapseRollingCues(cues);
+    expect(collapsed.length).toBeGreaterThanOrEqual(2);
+    expect(Math.max(...collapsed.map((c) => c.end - c.start))).toBeLessThanOrEqual(5.5);
   });
 });

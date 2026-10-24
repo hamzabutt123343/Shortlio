@@ -39,7 +39,14 @@ export type CaptionPresetId =
   | "creator_style"
   | "cinematic_box"
   | "gaming_hype"
-  | "typewriter";
+  | "typewriter"
+  // Capite-adapted (MIT) — see worker/pipeline/ass_animations.py
+  | "hormozi"
+  | "mrbeast"
+  | "crimson_pop"
+  | "bounce_pop"
+  | "neon_glow"
+  | "scale_clean";
 
 export interface Profile {
   id: string;
@@ -135,6 +142,7 @@ export interface Clip {
   burn_captions: boolean;
   quality: string;
   crop_settings: Record<string, unknown>;
+  viral_metadata?: Record<string, unknown> | null;
   render_status: "pending" | "rendering" | "ready" | "failed";
   storage_path: string | null;
   thumbnail_path: string | null;

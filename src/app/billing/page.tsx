@@ -60,9 +60,11 @@ export default function BillingPage() {
   }
 
   return (
-    <AppShell planLabel={usage?.plan === "pro" ? "Pro" : "Free"}>
+    <AppShell planLabel={usage?.plan === "pro" ? "Pro" : "Free"} title="Billing">
       <div className="mx-auto max-w-2xl space-y-6">
-        <h1 className="font-[family-name:var(--font-display)] text-3xl font-bold">Billing</h1>
+        <h1 className="font-[family-name:var(--font-display)] text-3xl font-bold tracking-tight">
+          Billing
+        </h1>
         <Card>
           <p className="text-sm text-[var(--text-muted)]">Current plan</p>
           <p className="mt-1 font-[family-name:var(--font-display)] text-3xl font-bold capitalize">

@@ -79,10 +79,23 @@ function LoginForm() {
 
 export default function LoginPage() {
   return (
-    <div className="flex min-h-screen items-center justify-center px-4">
-      <Suspense fallback={<Card className="w-full max-w-md">Loading…</Card>}>
-        <LoginForm />
-      </Suspense>
+    <div className="flex min-h-screen flex-col">
+      <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-4 py-5">
+        <Link
+          href="/"
+          className="font-[family-name:var(--font-display)] text-xl font-extrabold tracking-tight"
+        >
+          Shortlio
+        </Link>
+        <Link href="/signup" className="text-sm text-[var(--text-muted)] hover:text-[var(--text)]">
+          Create account
+        </Link>
+      </div>
+      <div className="flex flex-1 items-center justify-center px-4 pb-16">
+        <Suspense fallback={<Card className="w-full max-w-md">Loading…</Card>}>
+          <LoginForm />
+        </Suspense>
+      </div>
     </div>
   );
 }

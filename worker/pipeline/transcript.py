@@ -18,15 +18,30 @@ ProgressCb = Callable[[float, str], None]
 
 
 @dataclass
+class TranscriptWord:
+    word: str
+    start: float
+    end: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class TranscriptSegment:
     start: float
     end: float
     text: str
     speaker: str | None = None
     language: str | None = None
+    # Optional whisper word stamps (Capite-compatible); omitted when source lacks them.
+    words: list[TranscriptWord] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        if not payload.get("words"):
+            payload.pop("words", None)
+        return payload
 
 
 def _job_dir(base: Path, job_id: str) -> Path:
@@ -85,6 +100,11 @@ def _parse_vtt(content: str, language: str = "en") -> list[TranscriptSegment]:
 
 
 def _parse_json3(data: dict[str, Any], language: str = "en") -> list[TranscriptSegment]:
+    """Parse YouTube json3 captions, keeping per-token offsets when present.
+
+    Many ASR tracks include ``tOffsetMs`` on each ``utf8`` token — free word-level
+    timing without Whisper. When offsets are missing, segments stay cue-level only.
+    """
     segments: list[TranscriptSegment] = []
     events = data.get("events") or []
     for ev in events:
@@ -92,12 +112,66 @@ def _parse_json3(data: dict[str, Any], language: str = "en") -> list[TranscriptS
             continue
         start = float(ev.get("tStartMs", 0)) / 1000.0
         dur = float(ev.get("dDurationMs", ev.get("d", 0))) / 1000.0
-        text = "".join(s.get("utf8", "") for s in ev.get("segs", [])).strip()
-        if text:
-            segments.append(
-                TranscriptSegment(start=start, end=start + max(dur, 0.05), text=text, language=language)
+        raw_segs = ev.get("segs") or []
+        text = "".join(s.get("utf8", "") for s in raw_segs).strip()
+        if not text:
+            continue
+        end = start + max(dur, 0.05)
+        words = _words_from_json3_segs(raw_segs, event_start=start, event_end=end)
+        segments.append(
+            TranscriptSegment(
+                start=start,
+                end=end,
+                text=text,
+                language=language,
+                words=words,
             )
+        )
     return segments
+
+
+def _words_from_json3_segs(
+    segs: list[dict[str, Any]],
+    *,
+    event_start: float,
+    event_end: float,
+) -> list[TranscriptWord] | None:
+    """Build TranscriptWord list from json3 token offsets (when available)."""
+    tokens: list[tuple[str, float]] = []
+    for s in segs:
+        utf8 = str(s.get("utf8") or "")
+        if not utf8 or utf8.isspace():
+            continue
+        # Skip pure newlines / music marks
+        piece = utf8.replace("\n", " ").strip()
+        if not piece or piece in {"♪", "♫"}:
+            continue
+        try:
+            offset_ms = float(s.get("tOffsetMs", 0) or 0)
+        except (TypeError, ValueError):
+            offset_ms = 0.0
+        # A single utf8 field may contain multiple words.
+        for part in piece.split():
+            tokens.append((part, event_start + offset_ms / 1000.0))
+    if len(tokens) < 2:
+        # Single token or no offsets → not useful for word sync.
+        has_offset = any(
+            isinstance(s, dict) and s.get("tOffsetMs") not in (None, 0, 0.0)
+            for s in segs
+        )
+        if not has_offset or not tokens:
+            return None
+    out: list[TranscriptWord] = []
+    for i, (token, ws) in enumerate(tokens):
+        if i + 1 < len(tokens):
+            we = max(ws + 0.05, float(tokens[i + 1][1]))
+        else:
+            we = max(ws + 0.08, float(event_end))
+        # Clamp inside the event window.
+        ws = max(event_start, min(ws, event_end - 0.04))
+        we = max(ws + 0.04, min(we, event_end))
+        out.append(TranscriptWord(word=token, start=ws, end=we))
+    return out or None
 
 
 def _parse_srv3_xml(content: str, language: str = "en") -> list[TranscriptSegment]:
@@ -391,6 +465,7 @@ def transcribe_local(
         best_of=beam,
         condition_on_previous_text=False,
         without_timestamps=False,
+        word_timestamps=True,
     )
 
     if batched is not None:
@@ -405,12 +480,30 @@ def transcribe_local(
     duration = float(getattr(info, "duration", 0) or 0)
     out: list[TranscriptSegment] = []
     for seg in segments_iter:
+        word_objs: list[TranscriptWord] | None = None
+        raw_words = getattr(seg, "words", None) or []
+        if raw_words:
+            word_objs = []
+            for w in raw_words:
+                token = str(getattr(w, "word", "") or "").strip()
+                if not token:
+                    continue
+                word_objs.append(
+                    TranscriptWord(
+                        word=token,
+                        start=float(getattr(w, "start", seg.start) or seg.start),
+                        end=float(getattr(w, "end", seg.end) or seg.end),
+                    )
+                )
+            if not word_objs:
+                word_objs = None
         out.append(
             TranscriptSegment(
                 start=float(seg.start),
                 end=float(seg.end),
                 text=seg.text.strip(),
                 language=getattr(info, "language", None),
+                words=word_objs,
             )
         )
         if on_progress and duration > 0:
@@ -426,7 +519,13 @@ def transcribe_groq(audio_path: Path, settings: Settings | None = None) -> list[
         raise RuntimeError("GROQ_API_KEY required for groq transcription")
     with open(audio_path, "rb") as f:
         files = {"file": (audio_path.name, f, "audio/m4a")}
-        data = {"model": "whisper-large-v3", "response_format": "verbose_json"}
+        # Request word timestamps when Groq supports them (verbose_json + granularities).
+        data = [
+            ("model", "whisper-large-v3"),
+            ("response_format", "verbose_json"),
+            ("timestamp_granularities[]", "word"),
+            ("timestamp_granularities[]", "segment"),
+        ]
         headers = {"Authorization": f"Bearer {settings.groq_api_key}"}
         with httpx.Client(timeout=600.0) as client:
             resp = client.post(
@@ -438,20 +537,71 @@ def transcribe_groq(audio_path: Path, settings: Settings | None = None) -> list[
             resp.raise_for_status()
             payload = resp.json()
     segments: list[TranscriptSegment] = []
+    top_words = _words_from_payload(payload.get("words"))
     for seg in payload.get("segments") or []:
-        segments.append(
-            TranscriptSegment(
-                start=float(seg.get("start", 0)),
-                end=float(seg.get("end", 0)),
-                text=str(seg.get("text", "")).strip(),
-                language=payload.get("language"),
-            )
-        )
+        segments.append(_segment_from_dict(seg, default_language=payload.get("language")))
+    # If segments lack words but the payload has a flat word list, attach by overlap.
+    if top_words and segments and not any(s.words for s in segments):
+        for i, seg in enumerate(segments):
+            owned = [
+                w
+                for w in top_words
+                if w.end >= seg.start - 0.05 and w.start <= seg.end + 0.05
+            ]
+            if owned:
+                segments[i] = TranscriptSegment(
+                    start=seg.start,
+                    end=seg.end,
+                    text=seg.text,
+                    speaker=seg.speaker,
+                    language=seg.language,
+                    words=owned,
+                )
     if not segments and payload.get("text"):
         segments.append(
-            TranscriptSegment(start=0.0, end=0.0, text=str(payload["text"]).strip(), language=payload.get("language"))
+            TranscriptSegment(
+                start=0.0,
+                end=0.0,
+                text=str(payload["text"]).strip(),
+                language=payload.get("language"),
+                words=top_words,
+            )
         )
     return segments
+
+
+def _words_from_payload(raw_words: Any) -> list[TranscriptWord] | None:
+    if not raw_words:
+        return None
+    out: list[TranscriptWord] = []
+    for w in raw_words:
+        if isinstance(w, TranscriptWord):
+            out.append(w)
+            continue
+        if not isinstance(w, dict):
+            continue
+        token = str(w.get("word") or w.get("text") or "").strip()
+        if not token:
+            continue
+        out.append(
+            TranscriptWord(
+                word=token,
+                start=float(w.get("start", 0) or 0),
+                end=float(w.get("end", 0) or 0),
+            )
+        )
+    return out or None
+
+
+def _segment_from_dict(item: dict[str, Any], *, default_language: str | None = None) -> TranscriptSegment:
+    return TranscriptSegment(
+        start=float(item.get("start", 0) or 0),
+        end=float(item.get("end", 0) or 0),
+        text=str(item.get("text", "")).strip(),
+        speaker=item.get("speaker"),
+        language=item.get("language", default_language),
+        words=_words_from_payload(item.get("words")),
+    )
 
 
 def load_cached_transcript(work_dir: Path) -> list[TranscriptSegment] | None:
@@ -459,7 +609,7 @@ def load_cached_transcript(work_dir: Path) -> list[TranscriptSegment] | None:
     if not path.exists():
         return None
     raw = json.loads(path.read_text(encoding="utf-8"))
-    return [TranscriptSegment(**item) for item in raw]
+    return [_segment_from_dict(item) for item in raw]
 
 
 def save_transcript(work_dir: Path, segments: list[TranscriptSegment]) -> Path:

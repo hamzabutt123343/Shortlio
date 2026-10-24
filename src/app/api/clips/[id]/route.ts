@@ -4,6 +4,7 @@ import { requireUser } from "@/lib/auth/session";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { CAPTION_PRESETS } from "@/lib/captions/presets";
+import { DEFAULT_SEGMENT_PAD_SECONDS } from "@/lib/captions/style";
 import { resolutionFor } from "@/lib/formats";
 import type { AspectRatio } from "@/lib/types";
 
@@ -21,6 +22,7 @@ const updateSchema = z.object({
   outputFormat: z.enum(["9:16", "1:1", "16:9"]).optional(),
   quality: z.enum(["draft", "balanced", "high"]).optional(),
   cropSettings: z.record(z.string(), z.unknown()).optional(),
+  viralMetadata: z.record(z.string(), z.unknown()).optional(),
   reRender: z.boolean().optional(),
 });
 
@@ -47,7 +49,7 @@ export async function GET(_request: Request, { params }: Params) {
       signedUrl = data?.signedUrl ?? null;
     }
 
-    const pad = 1.5;
+    const pad = DEFAULT_SEGMENT_PAD_SECONDS;
     const { data: transcript } = await supabase
       .from("transcript_segments")
       .select("start_time,end_time,text,language")
@@ -96,6 +98,7 @@ export async function PATCH(request: Request, { params }: Params) {
     if (body.burnCaptions !== undefined) updates.burn_captions = body.burnCaptions;
     if (body.quality !== undefined) updates.quality = body.quality;
     if (body.cropSettings !== undefined) updates.crop_settings = body.cropSettings;
+    if (body.viralMetadata !== undefined) updates.viral_metadata = body.viralMetadata;
     if (body.outputFormat !== undefined) {
       updates.output_format = body.outputFormat;
       updates.resolution = resolutionFor(body.outputFormat as AspectRatio);

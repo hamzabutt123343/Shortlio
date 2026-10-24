@@ -10,7 +10,9 @@ from config import Settings, get_settings, run_subprocess
 from pipeline.captions import write_ass_file
 from pipeline.reframe import (
     ReframePlan,
+    compute_dual_layout_plan,
     compute_reframe_plan,
+    ffmpeg_split_filter_complex,
     ffmpeg_vf_chain,
     load_cached_plan,
     save_plan,
@@ -50,9 +52,9 @@ def validate_caption_filters(*, burn_captions: bool, ass_path: Path | None, vf: 
         if ass_path is None or not ass_path.exists():
             raise RuntimeError("burn_captions=True but ASS subtitle file is missing")
         if ass_hits == 0:
-            raise RuntimeError("burn_captions=True but no ASS filter in ffmpeg vf chain")
+            raise RuntimeError("burn_captions=True but no ASS filter in ffmpeg chain")
         if ass_hits > 1:
-            raise RuntimeError(f"Duplicate ASS caption filters in vf chain ({ass_hits})")
+            raise RuntimeError(f"Duplicate ASS caption filters in chain ({ass_hits})")
         dialogue_n = sum(
             1
             for line in ass_path.read_text(encoding="utf-8-sig").splitlines()
@@ -62,7 +64,7 @@ def validate_caption_filters(*, burn_captions: bool, ass_path: Path | None, vf: 
             logger.warning("ASS has zero dialogue lines — export captions will be blank")
     else:
         if ass_hits > 0:
-            raise RuntimeError("burn_captions=False but ASS filter present in vf chain")
+            raise RuntimeError("burn_captions=False but ASS filter present in chain")
         if ass_path is not None:
             raise RuntimeError("burn_captions=False but ASS path was provided")
 
@@ -88,17 +90,10 @@ def render_clip(
         out_h = int(out_h * scale) // 2 * 2
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    sendcmd_path = output_path.with_suffix(".sendcmd.txt")
-    write_sendcmd(sendcmd_path, plan)
-    vf = ffmpeg_vf_chain(
-        plan,
-        out_w=out_w,
-        out_h=out_h,
-        ass_path=ass_path,
-        sendcmd_path=sendcmd_path if plan.keyframes else None,
-    )
     burn = bool(ass_path) if burn_captions is None else burn_captions
-    validate_caption_filters(burn_captions=burn, ass_path=ass_path, vf=vf)
+    use_split = (plan.layout or "single") in ("split_stack", "reaction_stack") and len(
+        plan.panes
+    ) >= 2
 
     cmd = [
         ffmpeg,
@@ -108,41 +103,68 @@ def render_clip(
         "error",
         "-i",
         str(input_path),
-        "-vf",
-        vf,
-        "-af",
-        "asetpts=PTS-STARTPTS",
-        "-c:v",
-        "libx264",
-        "-preset",
-        q["preset"],
-        "-crf",
-        q["crf"],
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        q["audio_bitrate"],
-        "-ac",
-        "2",
-        "-sn",  # never mux softsubs — captions are burned (or omitted) only once
-        "-movflags",
-        "+faststart",
-        "-fflags",
-        "+genpts",
-        "-threads",
-        "0",
-        str(output_path),
     ]
+
+    if use_split:
+        fc = ffmpeg_split_filter_complex(
+            plan, out_w=out_w, out_h=out_h, ass_path=ass_path if burn else None
+        )
+        validate_caption_filters(
+            burn_captions=burn, ass_path=ass_path if burn else None, vf=fc
+        )
+        cmd.extend(["-filter_complex", fc, "-map", "[vout]", "-map", "0:a?"])
+    else:
+        sendcmd_path = output_path.with_suffix(".sendcmd.txt")
+        write_sendcmd(sendcmd_path, plan)
+        vf = ffmpeg_vf_chain(
+            plan,
+            out_w=out_w,
+            out_h=out_h,
+            ass_path=ass_path if burn else None,
+            sendcmd_path=sendcmd_path if plan.keyframes else None,
+        )
+        validate_caption_filters(
+            burn_captions=burn, ass_path=ass_path if burn else None, vf=vf
+        )
+        cmd.extend(["-vf", vf])
+
+    cmd.extend(
+        [
+            "-af",
+            "asetpts=PTS-STARTPTS",
+            "-c:v",
+            "libx264",
+            "-preset",
+            q["preset"],
+            "-crf",
+            q["crf"],
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            q["audio_bitrate"],
+            "-ac",
+            "2",
+            "-sn",  # never mux softsubs — captions are burned (or omitted) only once
+            "-movflags",
+            "+faststart",
+            "-fflags",
+            "+genpts",
+            "-threads",
+            "0",
+            str(output_path),
+        ]
+    )
     logger.info(
-        "Rendering %s quality=%s preset=%s size=%dx%d animated=%s",
+        "Rendering %s quality=%s preset=%s size=%dx%d layout=%s animated=%s",
         output_path.name,
         quality,
         q["preset"],
         out_w,
         out_h,
-        bool(plan.keyframes),
+        plan.layout or "single",
+        bool(plan.keyframes) and not use_split,
     )
     run_subprocess(cmd, timeout=3600)
     return output_path
@@ -150,10 +172,10 @@ def render_clip(
 
 def _parse_crop_settings(
     crop_settings: dict[str, Any] | None,
-) -> tuple[float | None, bool, bool, str]:
-    """Return focal_x, manual, speaker_focus, switch_style."""
+) -> tuple[float | None, bool, bool, str, str, str, float, str | None]:
+    """Return focal_x, manual, speaker_focus, switch_style, layout, stack_direction, panel_ratio, fit_mode."""
     if not crop_settings:
-        return None, False, True, "hard_cut"
+        return None, False, True, "hard_cut", "single", "top_bottom", 0.5, None
     focal = crop_settings.get("focal_x")
     mode = str(crop_settings.get("mode") or "")
     manual = mode in ("manual_override", "manual") or bool(crop_settings.get("manual"))
@@ -174,11 +196,43 @@ def _parse_crop_settings(
         tracking = "hard_cut" if speaker_focus else "subject"
     if not speaker_focus:
         tracking = "subject"
+    layout = str(crop_settings.get("layout") or "single").lower().strip()
+    if layout in ("split", "dual", "podcast", "split_speakers"):
+        layout = "split_stack"
+    if layout in ("reaction", "react"):
+        layout = "reaction_stack"
+    if layout not in ("single", "split_stack", "reaction_stack"):
+        layout = "single"
+    # Dual layouts own framing — don't also cut between speakers.
+    if layout != "single":
+        speaker_focus = False
+        tracking = "subject"
+    stack_direction = str(
+        crop_settings.get("stack_direction")
+        or crop_settings.get("stack")
+        or "top_bottom"
+    )
+    try:
+        panel_ratio = float(crop_settings.get("panel_ratio", 0.5))
+    except (TypeError, ValueError):
+        panel_ratio = 0.5
+    panel_ratio = max(0.25, min(0.75, panel_ratio))
+    fit_raw = crop_settings.get("fit_mode")
+    fit_mode = str(fit_raw) if fit_raw is not None else None
     try:
         focal_f = float(focal) if focal is not None else None
     except (TypeError, ValueError):
         focal_f = None
-    return focal_f, manual, speaker_focus, tracking
+    return (
+        focal_f,
+        manual,
+        speaker_focus,
+        tracking,
+        layout,
+        stack_direction,
+        panel_ratio,
+        fit_mode,
+    )
 
 
 def render_moment_clip(
@@ -227,7 +281,16 @@ def render_moment_clip(
                 f"Caption language processing failed ({src} → {hint}): {exc}"
             ) from exc
     
-    focal_x, manual, speaker_focus, switch_style = _parse_crop_settings(crop_settings)
+    (
+        focal_x,
+        manual,
+        speaker_focus,
+        switch_style,
+        layout,
+        stack_direction,
+        panel_ratio,
+        fit_mode,
+    ) = _parse_crop_settings(crop_settings)
     cache_path = tracking_cache_path(
         track_root,
         segment_path,
@@ -236,6 +299,10 @@ def render_moment_clip(
         manual,
         speaker_focus=speaker_focus,
         switch_style=switch_style,
+        layout=layout,
+        stack_direction=stack_direction,
+        panel_ratio=panel_ratio,
+        fit_mode=fit_mode or ("contain" if layout == "reaction_stack" else "cover"),
     )
     plan = load_cached_plan(cache_path)
     if plan is None:
@@ -243,21 +310,33 @@ def render_moment_clip(
         plan_path = work_dir / f"plan_{index:03d}.json"
         plan = load_cached_plan(plan_path)
         if plan is None:
-            transcript_speakers = [
-                (s.start, s.end, s.speaker)
-                for s in transcript
-                if getattr(s, "speaker", None)
-            ]
-            plan = compute_reframe_plan(
-                segment_path,
-                aspect=aspect,
-                focal_x=focal_x,
-                manual_override=manual and focal_x is not None,
-                model_cache_dir=model_cache,
-                speaker_focus=speaker_focus,
-                switch_style=switch_style,
-                transcript_speakers=transcript_speakers or None,
-            )
+            if layout in ("split_stack", "reaction_stack"):
+                plan = compute_dual_layout_plan(
+                    segment_path,
+                    layout=layout,
+                    aspect=aspect,
+                    model_cache_dir=model_cache,
+                    focal_x=focal_x,
+                    stack_direction=stack_direction,
+                    panel_ratio=panel_ratio,
+                    fit_mode=fit_mode,
+                )
+            else:
+                transcript_speakers = [
+                    (s.start, s.end, s.speaker)
+                    for s in transcript
+                    if getattr(s, "speaker", None)
+                ]
+                plan = compute_reframe_plan(
+                    segment_path,
+                    aspect=aspect,
+                    focal_x=focal_x,
+                    manual_override=manual and focal_x is not None,
+                    model_cache_dir=model_cache,
+                    speaker_focus=speaker_focus,
+                    switch_style=switch_style,
+                    transcript_speakers=transcript_speakers or None,
+                )
             save_plan(plan_path, plan)
             save_plan(cache_path, plan)
         else:

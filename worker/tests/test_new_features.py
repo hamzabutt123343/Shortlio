@@ -18,6 +18,13 @@ def test_new_presets():
         "cinematic_box",
         "gaming_hype",
         "typewriter",
+        # Capite-adapted
+        "hormozi",
+        "mrbeast",
+        "crimson_pop",
+        "bounce_pop",
+        "neon_glow",
+        "scale_clean",
     }
     actual = set(_PRESET_STYLES.keys())
     assert actual == expected, f"Presets mismatch: {actual ^ expected}"

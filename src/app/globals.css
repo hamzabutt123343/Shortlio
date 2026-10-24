@@ -1,22 +1,32 @@
 @import "tailwindcss";
 
 :root {
-  --bg: #0c0d0f;
-  --bg-elevated: #12141a;
-  --surface: #171a21;
-  --surface-hover: #1d212b;
-  --border: #2a2f3a;
-  --border-strong: #3a4150;
-  --text: #f2f3f5;
-  --text-muted: #8b929e;
-  --accent: #3dd6c6;
-  --accent-dim: rgba(61, 214, 198, 0.14);
+  --bg: #0a0a0b;
+  --bg-elevated: #111113;
+  --surface: #161618;
+  --surface-hover: #1c1c1f;
+  --border: #27272a;
+  --border-strong: #3f3f46;
+  --text: #fafafa;
+  --text-muted: #a1a1aa;
+  --accent: #ff5c39;
+  --accent-hover: #ff7555;
+  --accent-dim: rgba(255, 92, 57, 0.12);
+  --accent-glow: rgba(255, 92, 57, 0.18);
   --danger: #f07178;
   --warning: #e6b450;
-  --success: #7fd99a;
+  --success: #6dca8d;
   --radius: 10px;
-  --font-display: var(--font-syne), ui-sans-serif, system-ui, sans-serif;
-  --font-body: var(--font-dm-sans), ui-sans-serif, system-ui, sans-serif;
+  /* Loaded via <link> in layout — same CSS vars as the old next/font setup. */
+  --font-syne: "Syne", ui-sans-serif, system-ui, sans-serif;
+  --font-dm-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-caption-montserrat: "Montserrat", ui-sans-serif, system-ui, sans-serif;
+  --font-caption-anton: "Anton", Impact, ui-sans-serif, sans-serif;
+  --font-caption-poppins: "Poppins", ui-sans-serif, system-ui, sans-serif;
+  --font-caption-inter: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-caption-roboto: "Roboto", ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-syne);
+  --font-body: var(--font-dm-sans);
 }
 
 @theme inline {
@@ -36,14 +46,15 @@
 
 html {
   color-scheme: dark;
+  scroll-behavior: smooth;
 }
 
 body {
   margin: 0;
   min-height: 100%;
   background:
-    radial-gradient(1200px 600px at 10% -10%, rgba(61, 214, 198, 0.08), transparent 55%),
-    radial-gradient(900px 500px at 90% 0%, rgba(255, 255, 255, 0.03), transparent 50%),
+    radial-gradient(900px 480px at 8% -12%, rgba(255, 92, 57, 0.07), transparent 55%),
+    radial-gradient(700px 420px at 92% 0%, rgba(255, 255, 255, 0.03), transparent 48%),
     var(--bg);
   color: var(--text);
   font-family: var(--font-body);
@@ -56,13 +67,13 @@ a {
 }
 
 ::selection {
-  background: rgba(61, 214, 198, 0.35);
+  background: rgba(255, 92, 57, 0.35);
 }
 
 @keyframes fade-up {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(12px);
   }
   to {
     opacity: 1;
@@ -80,12 +91,48 @@ a {
   }
 }
 
+@keyframes caption-cycle {
+  0%,
+  20% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  28%,
+  72% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  80%,
+  100% {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes frame-pan {
+  0%,
+  100% {
+    transform: scale(1.05) translateX(0);
+  }
+  50% {
+    transform: scale(1.08) translateX(-2%);
+  }
+}
+
 .animate-fade-up {
-  animation: fade-up 0.45s ease-out both;
+  animation: fade-up 0.5s ease-out both;
 }
 
 .animate-pulse-soft {
   animation: pulse-soft 1.6s ease-in-out infinite;
+}
+
+.animate-caption-cycle {
+  animation: caption-cycle 4.5s ease-in-out infinite;
+}
+
+.animate-frame-pan {
+  animation: frame-pan 12s ease-in-out infinite;
 }
 
 @keyframes caption-fade {
@@ -143,4 +190,68 @@ a {
 
 .caption-anim-word-pop {
   animation: caption-word-pop 0.45s cubic-bezier(0.2, 0.9, 0.25, 1.25) both;
+}
+
+/* Capite-adapted active-word states (MIT) — mirror ASS engines in ass_animations.py */
+.caption-word-active-pop {
+  display: inline-block;
+  transform: scale(1.16);
+  transition: transform 0.12s cubic-bezier(0.34, 1.56, 0.64, 1), color 0.1s ease;
+}
+
+.caption-word-active-bounce {
+  display: inline-block;
+  transform: translateY(-5px) scale(1.18);
+  transition: transform 0.12s cubic-bezier(0.34, 1.56, 0.64, 1), color 0.1s ease;
+}
+
+.caption-word-active-scale {
+  display: inline-block;
+  transform: scale(1.12);
+  transition: transform 0.15s ease, color 0.1s ease;
+}
+
+.caption-word-active-glow {
+  display: inline-block;
+  filter: drop-shadow(0 0 8px currentColor) drop-shadow(0 0 18px currentColor);
+  transition: filter 0.15s ease, color 0.1s ease;
+}
+
+.caption-word-active-box {
+  display: inline-block;
+  border-radius: 6px;
+  padding: 1px 7px;
+  transform: scale(1.08);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  transition: all 0.15s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.caption-word-active-highlight {
+  display: inline-block;
+  transition: color 0.1s ease;
+}
+
+/* Marketing / app chrome */
+.marketing-section {
+  border-top: 1px solid var(--border);
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.04),
+    rgba(255, 255, 255, 0.08),
+    rgba(255, 255, 255, 0.04)
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
 }

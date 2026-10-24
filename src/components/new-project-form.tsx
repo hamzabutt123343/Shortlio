@@ -1,25 +1,53 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { FormEvent, useState } from "react";
+import { FormEvent, useMemo, useState } from "react";
 import { CaptionStylePicker } from "@/components/caption-style-picker";
 import { Button, Card, Input, Label } from "@/components/ui";
 import { settingsForPresetMode, type CaptionSettings } from "@/lib/captions/style";
+import {
+  DEFAULT_FRAMING_MODE,
+  FRAMING_OPTIONS,
+  cropSettingsForFramingMode,
+  type FramingMode,
+} from "@/lib/framing";
 import { CLIP_COUNT_OPTIONS, type UsageInfo } from "@/lib/types";
 
-export function NewProjectForm({ usage }: { usage: UsageInfo }) {
+const FRAMING_IDS = new Set(FRAMING_OPTIONS.map((o) => o.id));
+
+export function NewProjectForm({
+  usage,
+  initialPreset,
+  initialFraming,
+  initialLanguage,
+}: {
+  usage: UsageInfo;
+  initialPreset?: string;
+  initialFraming?: string;
+  initialLanguage?: string;
+}) {
   const router = useRouter();
   const [url, setUrl] = useState("");
   const [clipCount, setClipCount] = useState(1);
   const [aspectRatio, setAspectRatio] = useState<"9:16" | "1:1" | "16:9">("9:16");
-  const [captionPreset, setCaptionPreset] = useState("classic_white");
-  const [captionLanguage, setCaptionLanguage] = useState("en");
+  const [captionPreset, setCaptionPreset] = useState(initialPreset || "classic_white");
+  const [captionLanguage, setCaptionLanguage] = useState(initialLanguage || "en");
   const [captionSettings, setCaptionSettings] = useState<CaptionSettings>(settingsForPresetMode);
   const [platformPreset, setPlatformPreset] = useState("youtube_shorts");
+  const [framingMode, setFramingMode] = useState<FramingMode>(
+    initialFraming && FRAMING_IDS.has(initialFraming as FramingMode)
+      ? (initialFraming as FramingMode)
+      : DEFAULT_FRAMING_MODE,
+  );
   const [error, setError] = useState<string | null>(null);
   const [workerNote, setWorkerNote] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  const framingHint = useMemo(
+    () => FRAMING_OPTIONS.find((o) => o.id === framingMode)?.description ?? "",
+    [framingMode],
+  );
 
   const freeBlocked =
     usage.plan === "free" && usage.remaining !== null && clipCount > usage.remaining;
@@ -43,6 +71,7 @@ export function NewProjectForm({ usage }: { usage: UsageInfo }) {
           captionLanguage,
           captionSettings,
           platformPreset,
+          cropSettings: cropSettingsForFramingMode(framingMode),
         }),
       });
       const data = await res.json();
@@ -60,8 +89,10 @@ export function NewProjectForm({ usage }: { usage: UsageInfo }) {
   }
 
   return (
-    <Card>
-      <h2 className="font-[family-name:var(--font-display)] text-xl font-semibold">New project</h2>
+    <Card className="border-[var(--border)] bg-[var(--surface)]/70">
+      <h2 className="font-[family-name:var(--font-display)] text-xl font-semibold">
+        Import YouTube URL
+      </h2>
       <p className="mt-1 text-sm text-[var(--text-muted)]">
         Paste a public video URL. Analysis starts after you create the project.
       </p>
@@ -74,6 +105,7 @@ export function NewProjectForm({ usage }: { usage: UsageInfo }) {
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             required
+            className="text-base"
           />
         </div>
         <div className="grid gap-4 sm:grid-cols-2">
@@ -118,6 +150,24 @@ export function NewProjectForm({ usage }: { usage: UsageInfo }) {
               <option value="1:1">1:1 · 1080×1080</option>
               <option value="16:9">16:9 · 1920×1080</option>
             </select>
+          </div>
+          <div className="sm:col-span-2">
+            <Label htmlFor="framing">Smart framing</Label>
+            <select
+              id="framing"
+              className="w-full rounded-[10px] border border-[var(--border)] bg-[var(--bg-elevated)] px-3 py-2.5 text-sm"
+              value={framingMode}
+              onChange={(e) => setFramingMode(e.target.value as FramingMode)}
+            >
+              {FRAMING_OPTIONS.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            {framingHint && (
+              <p className="mt-1.5 text-xs text-[var(--text-muted)]">{framingHint}</p>
+            )}
           </div>
         </div>
 

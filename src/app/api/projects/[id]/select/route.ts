@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { handleRouteError, jsonError, jsonOk } from "@/lib/api";
 import { requireUser } from "@/lib/auth/session";
+import { cropSettingsForFramingMode } from "@/lib/framing";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getUsageInfo, reserveClipQuota } from "@/lib/quota";
 
@@ -53,12 +54,7 @@ export async function POST(request: Request, { params }: Params) {
       caption_preset: body.captionPreset ?? "classic_white",
       caption_settings: body.captionSettings ?? {},
       language: body.captionLanguage ?? "en",
-      crop_settings: body.cropSettings ?? {
-        focal_x: 0.5,
-        mode: "auto",
-        speaker_focus: true,
-        tracking_mode: "hard_cut",
-      },
+      crop_settings: body.cropSettings ?? cropSettingsForFramingMode("smart_auto"),
       mode: "render_selected",
     };
 

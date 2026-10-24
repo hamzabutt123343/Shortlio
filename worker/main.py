@@ -263,6 +263,44 @@ def _render_and_upload_clips(
         )
         clip_row: dict[str, Any] | None = None
         if project_id and user_id:
+            viral_meta = None
+            try:
+                from pipeline.viral_metadata import (
+                    generate_viral_metadata,
+                    surrounding_context_text,
+                    transcript_window_text,
+                )
+
+                clip_text = transcript_window_text(
+                    segments, moment.start, moment.end
+                )
+                surround = surrounding_context_text(
+                    segments, moment.start, moment.end
+                )
+                source_title = ""
+                source_channel = ""
+                source_uploader = ""
+                if project_id:
+                    project_row = repo.get_project(project_id)
+                    if project_row:
+                        source_title = str(project_row.get("source_title") or "")
+                        source_meta = project_row.get("source_metadata") or {}
+                        if isinstance(source_meta, dict):
+                            source_channel = str(source_meta.get("channel") or "")
+                            source_uploader = str(source_meta.get("uploader") or "")
+                viral_meta = generate_viral_metadata(
+                    transcript=clip_text,
+                    clip_title=moment.title,
+                    language=language_hint,
+                    settings=settings,
+                    source_title=source_title,
+                    source_channel=source_channel,
+                    source_uploader=source_uploader,
+                    surrounding_context=surround,
+                )
+            except Exception as meta_exc:
+                logger.warning("Viral metadata generation skipped: %s", meta_exc)
+
             clip_row = repo.upsert_rendered_clip(
                 clip_id=target.clip_id,
                 project_id=project_id,
@@ -283,6 +321,7 @@ def _render_and_upload_clips(
                 caption_settings=caption_settings or {},
                 burn_captions=burn_captions,
                 crop_settings=crop_settings,
+                viral_metadata=viral_meta,
             )
             if confirm_quota and clip_row and clip_row.get("id"):
                 repo.confirm_clip_success(user_id, str(clip_row["id"]), job_id)

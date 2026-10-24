@@ -17,9 +17,9 @@ export function Button({
       className={cn(
         "inline-flex items-center justify-center gap-2 rounded-[10px] px-4 py-2.5 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50",
         variant === "primary" &&
-          "bg-[var(--accent)] text-[#041512] hover:brightness-110",
+          "bg-[var(--accent)] text-white shadow-[0_0_0_1px_rgba(255,92,57,0.2)] hover:bg-[var(--accent-hover)]",
         variant === "secondary" &&
-          "border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--surface-hover)]",
+          "border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)]",
         variant === "ghost" && "text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-white/5",
         variant === "danger" && "bg-[var(--danger)]/15 text-[var(--danger)] hover:bg-[var(--danger)]/25",
         className,
