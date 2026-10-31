@@ -52,10 +52,12 @@ jobs:
           SHORTLIO_APP_URL: ${{ vars.SHORTLIO_APP_URL }}
         run: |
           if [ -z "${SHORTLIO_APP_URL:-}" ]; then
-            echo "::error::Set repository variable SHORTLIO_APP_URL to your live site (e.g. https://your-app.vercel.app) before releasing the Windows EXE."
-            exit 1
+            # Prefer a live URL. Without it the EXE opens localhost (dev only).
+            URL="http://localhost:3000"
+            echo "::warning::Repository variable SHORTLIO_APP_URL is not set. Packaging localhost — set SHORTLIO_APP_URL in repo Settings → Variables for production."
+          else
+            URL="$SHORTLIO_APP_URL"
           fi
-          URL="$SHORTLIO_APP_URL"
           node -e "const fs=require('fs'); fs.writeFileSync('app-config.json', JSON.stringify({ appUrl: process.argv[1] }, null, 2) + '\n');" "$URL"
           echo "Packaged appUrl=${URL}"
 
