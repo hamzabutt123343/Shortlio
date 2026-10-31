@@ -6,6 +6,7 @@ import { createClient } from "@/lib/supabase/server";
 import { CAPTION_PRESETS } from "@/lib/captions/presets";
 import { DEFAULT_SEGMENT_PAD_SECONDS } from "@/lib/captions/style";
 import { resolutionFor } from "@/lib/formats";
+import { localClipProtocolUrl, parseLocalClipPath } from "@/lib/local-clip-path";
 import type { AspectRatio } from "@/lib/types";
 
 type Params = { params: Promise<{ id: string }> };
@@ -41,7 +42,10 @@ export async function GET(_request: Request, { params }: Params) {
     if (!clip) return jsonError("Clip not found", 404);
 
     let signedUrl: string | null = null;
-    if (clip.storage_path) {
+    let localPath: string | null = parseLocalClipPath(clip.storage_path);
+    if (localPath) {
+      signedUrl = localClipProtocolUrl(localPath);
+    } else if (clip.storage_path) {
       const admin = createAdminClient();
       const { data } = await admin.storage
         .from("clips")
@@ -64,6 +68,7 @@ export async function GET(_request: Request, { params }: Params) {
     return jsonOk({
       clip,
       signedUrl,
+      localPath,
       presets: CAPTION_PRESETS,
       transcript: transcript ?? [],
     });
@@ -182,7 +187,7 @@ export async function DELETE(_request: Request, { params }: Params) {
       .eq("user_id", user.id)
       .maybeSingle();
     if (!clip) return jsonError("Clip not found", 404);
-    if (clip.storage_path) {
+    if (clip.storage_path && !clip.storage_path.startsWith("local:")) {
       await admin.storage.from("clips").remove([clip.storage_path]);
     }
     await admin.from("clips").delete().eq("id", id).eq("user_id", user.id);

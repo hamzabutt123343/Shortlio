@@ -4,7 +4,6 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
-  Clapperboard,
   CreditCard,
   LayoutDashboard,
   LogOut,
@@ -14,6 +13,8 @@ import {
   LayoutTemplate,
   ChevronDown,
 } from "lucide-react";
+import { BrandLogo } from "@/components/brand-logo";
+import { isShortlioDesktop } from "@/lib/desktop-bridge";
 import { createClient } from "@/lib/supabase/client";
 import { Button, cn } from "@/components/ui";
 
@@ -41,12 +42,14 @@ export function AppShell({
   const router = useRouter();
   const [email, setEmail] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [desktopOnline, setDesktopOnline] = useState(false);
 
   useEffect(() => {
     const supabase = createClient();
     void supabase.auth.getUser().then(({ data }) => {
       setEmail(data.user?.email ?? null);
     });
+    setDesktopOnline(isShortlioDesktop());
   }, []);
 
   async function signOut() {
@@ -64,11 +67,14 @@ export function AppShell({
             href="/dashboard"
             className="flex items-center gap-2.5 font-[family-name:var(--font-display)] text-lg font-bold tracking-tight"
           >
-            <span className="inline-flex h-8 w-8 items-center justify-center rounded-[9px] bg-[var(--accent-dim)] text-[var(--accent)]">
-              <Clapperboard className="h-4 w-4" />
-            </span>
+            <BrandLogo size={32} />
             Shortlio
           </Link>
+          {desktopOnline && (
+            <p className="mt-2 hidden text-[10px] font-medium uppercase tracking-wider text-[var(--success)] md:block">
+              Desktop engine connected
+            </p>
+          )}
 
           <nav className="mt-0 flex gap-0.5 overflow-x-auto md:mt-8 md:flex-col md:gap-1">
             {links.map((link) => {

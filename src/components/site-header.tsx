@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { Menu, X } from "lucide-react";
+import { BrandLogo } from "@/components/brand-logo";
 import { Button, cn } from "@/components/ui";
 
 const NAV = [
@@ -20,8 +21,9 @@ export function SiteHeader({ authed = false }: { authed?: boolean }) {
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4">
         <Link
           href="/"
-          className="font-[family-name:var(--font-display)] text-xl font-extrabold tracking-tight"
+          className="flex items-center gap-2.5 font-[family-name:var(--font-display)] text-xl font-extrabold tracking-tight"
         >
+          <BrandLogo size={36} priority />
           Shortlio
         </Link>
 

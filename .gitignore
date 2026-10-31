@@ -36,8 +36,16 @@ yarn-error.log*
 !worker/.env.example
 !desktop/.env.example
 
-# desktop Electron build output
+# desktop Electron build output + bundled engine artifacts
 desktop/dist/
+desktop/resources/engine/**
+!desktop/resources/engine/.gitkeep
+desktop/resources/ffmpeg/**
+!desktop/resources/ffmpeg/.gitkeep
+desktop/resources/node/**
+!desktop/resources/node/.gitkeep
+desktop/resources/bin/**
+!desktop/resources/bin/.gitkeep
 
 # worker
 worker/.venv/

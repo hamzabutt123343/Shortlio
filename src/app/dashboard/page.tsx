@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
+import { DesktopRequired } from "@/components/desktop-required";
 import { NewProjectForm } from "@/components/new-project-form";
 import { RecentProjects } from "@/components/recent-projects";
 import { Button } from "@/components/ui";
@@ -7,7 +8,6 @@ import { redirect } from "next/navigation";
 import { getSessionUser } from "@/lib/auth/session";
 import { getUsageInfo } from "@/lib/quota";
 import { createClient } from "@/lib/supabase/server";
-import { getWorkerStatus } from "@/lib/worker-status";
 import type { Project } from "@/lib/types";
 import { Captions, Ratio, ScanFace, Languages } from "lucide-react";
 
@@ -15,7 +15,6 @@ export default async function DashboardPage() {
   const user = await getSessionUser();
   if (!user) redirect("/login");
   const usage = await getUsageInfo(user.id);
-  const worker = await getWorkerStatus();
   const supabase = await createClient();
   const { data: projects } = await supabase
     .from("projects")
@@ -42,22 +41,14 @@ export default async function DashboardPage() {
               Create clips
             </h1>
             <p className="mt-1.5 max-w-xl text-sm text-[var(--text-muted)]">
-              Paste a public video URL to analyze moments, reframe speakers, and export shorts.
+              Paste a public video URL in the Windows app to analyze moments, reframe speakers, and
+              export shorts to your PC.
             </p>
           </div>
           <Link href="/create">
             <Button>Create New Clips</Button>
           </Link>
         </div>
-
-        {!worker.available && (
-          <div
-            role="alert"
-            className="rounded-[10px] border border-[var(--warning)]/30 bg-[var(--warning)]/10 px-4 py-3 text-sm text-[var(--warning)]"
-          >
-            {worker.message}
-          </div>
-        )}
 
         {usage.plan === "free" && (
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-[12px] border border-[var(--border)] bg-[var(--surface)]/70 px-4 py-3">
@@ -76,7 +67,9 @@ export default async function DashboardPage() {
         )}
 
         <div id="create">
-          <NewProjectForm usage={usage} />
+          <DesktopRequired>
+            <NewProjectForm usage={usage} />
+          </DesktopRequired>
         </div>
 
         <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

@@ -27,7 +27,12 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
-      - name: Install dependencies
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install npm dependencies
         run: npm ci
 
       - name: Resolve version
@@ -47,13 +52,55 @@ jobs:
           SHORTLIO_APP_URL: ${{ vars.SHORTLIO_APP_URL }}
         run: |
           if [ -z "${SHORTLIO_APP_URL:-}" ]; then
-            URL="http://localhost:3000"
-            echo "::warning::Repository variable SHORTLIO_APP_URL is not set; packaging localhost default."
-          else
-            URL="$SHORTLIO_APP_URL"
+            echo "::error::Set repository variable SHORTLIO_APP_URL to your live site (e.g. https://your-app.vercel.app) before releasing the Windows EXE."
+            exit 1
           fi
+          URL="$SHORTLIO_APP_URL"
           node -e "const fs=require('fs'); fs.writeFileSync('app-config.json', JSON.stringify({ appUrl: process.argv[1] }, null, 2) + '\n');" "$URL"
           echo "Packaged appUrl=${URL}"
+
+      - name: Bundle Python engine
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File ./scripts/bundle-engine.ps1
+
+      - name: Fetch FFmpeg essentials (Windows)
+        shell: pwsh
+        run: |
+          $out = "resources/ffmpeg"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          # Public static build (gyan.dev essentials). Pin via mirror if this URL changes.
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP "ffmpeg") -Force
+          $bin = Get-ChildItem -Path (Join-Path $env:RUNNER_TEMP "ffmpeg") -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+          $probe = Get-ChildItem -Path (Join-Path $env:RUNNER_TEMP "ffmpeg") -Recurse -Filter "ffprobe.exe" | Select-Object -First 1
+          if (-not $bin -or -not $probe) { throw "ffmpeg/ffprobe not found in archive" }
+          Copy-Item $bin.FullName (Join-Path $out "ffmpeg.exe") -Force
+          Copy-Item $probe.FullName (Join-Path $out "ffprobe.exe") -Force
+
+      - name: Fetch portable Node
+        shell: pwsh
+        run: |
+          $out = "resources/node"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $zip = Join-Path $env:RUNNER_TEMP "node.zip"
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP "node") -Force
+          $exe = Get-ChildItem -Path (Join-Path $env:RUNNER_TEMP "node") -Recurse -Filter "node.exe" | Select-Object -First 1
+          if (-not $exe) { throw "node.exe not found" }
+          Copy-Item $exe.FullName (Join-Path $out "node.exe") -Force
+
+      - name: Secret scan packaged resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fail if obvious secrets appear under resources or source that ships with the EXE.
+          if grep -R -n -E "GROQ_API_KEY[[:space:]]*=[[:space:]]*.*gsk_|SUPABASE_SERVICE_ROLE_KEY[[:space:]]*=[[:space:]]*.*eyJ|sk_live_|sk_test_" \
+              resources src app-config.json package.json 2>/dev/null; then
+            echo "::error::Possible secret material found in desktop package inputs"
+            exit 1
+          fi
+          echo "Secret scan passed (no high-confidence key material in package inputs)."
 
       - name: Build Windows installer + portable
         run: npm run dist:win

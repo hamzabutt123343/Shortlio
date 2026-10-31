@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { BrandLogo } from "@/components/brand-logo";
 import { DISCORD_INVITE_URL } from "@/lib/pricing";
 
 export function SiteFooter() {
@@ -7,7 +8,10 @@ export function SiteFooter() {
     <footer className="border-t border-[var(--border)] bg-[var(--bg-elevated)]/40">
       <div className="mx-auto grid max-w-6xl gap-10 px-4 py-14 md:grid-cols-[1.4fr_1fr_1fr]">
         <div>
-          <p className="font-[family-name:var(--font-display)] text-lg font-bold">Shortlio</p>
+          <p className="flex items-center gap-2.5 font-[family-name:var(--font-display)] text-lg font-bold">
+            <BrandLogo size={28} />
+            Shortlio
+          </p>
           <p className="mt-2 max-w-sm text-sm leading-relaxed text-[var(--text-muted)]">
             The fastest clipping software — AI moments, face-aware reframing, and animated captions
             for Shorts, TikTok, and Reels.

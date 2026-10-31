@@ -133,6 +133,34 @@ def ensure_under_upload_limit(local_path: Path, settings: Settings) -> Path:
     )
 
 
+def _save_clip_locally(
+    local_path: Path,
+    *,
+    job_id: str,
+    clip_index: int,
+    settings: Settings,
+    storage_path: str | None = None,
+) -> dict[str, Any]:
+    import shutil
+
+    out_dir = settings.resolved_output_dir() / job_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    name = Path(storage_path).name if storage_path else f"clip_{clip_index:03d}.mp4"
+    if not name.lower().endswith(".mp4"):
+        name = f"{name}.mp4"
+    dest = out_dir / name
+    shutil.copy2(local_path, dest)
+    logger.info("Saved clip locally: %s (%.1fMB)", dest, dest.stat().st_size / (1024 * 1024))
+    return {
+        "bucket": "local",
+        "path": f"local:{dest}",
+        "local_path": str(dest),
+        "signed_url": None,
+        "expires_in": 0,
+        "size_bytes": dest.stat().st_size,
+    }
+
+
 def upload_clip(
     local_path: Path,
     *,
@@ -143,6 +171,15 @@ def upload_clip(
     storage_path: str | None = None,
 ) -> dict[str, Any]:
     settings = settings or get_settings()
+    if str(settings.output_mode).lower() == "local":
+        return _save_clip_locally(
+            local_path,
+            job_id=job_id,
+            clip_index=clip_index,
+            settings=settings,
+            storage_path=storage_path,
+        )
+
     client = get_supabase(settings)
     storage = client.storage.from_(CLIPS_BUCKET)
     object_name = storage_path or _object_path(job_id, f"clip_{clip_index:03d}.mp4")
@@ -170,6 +207,9 @@ def upload_clip(
 def ensure_bucket_exists(settings: Settings | None = None) -> None:
     """Best-effort bucket check; create via Supabase dashboard if missing."""
     settings = settings or get_settings()
+    if str(settings.output_mode).lower() == "local":
+        settings.resolved_output_dir()
+        return
     client = get_supabase(settings)
     try:
         buckets = client.storage.list_buckets()

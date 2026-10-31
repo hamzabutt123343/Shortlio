@@ -5,6 +5,7 @@ import { getSessionUser } from "@/lib/auth/session";
 import { getUsageInfo } from "@/lib/quota";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { DEFAULT_SEGMENT_PAD_SECONDS } from "@/lib/captions/style";
+import { localClipProtocolUrl, parseLocalClipPath } from "@/lib/local-clip-path";
 import { createClient } from "@/lib/supabase/server";
 
 type Props = { params: Promise<{ id: string }> };
@@ -25,7 +26,10 @@ export default async function ClipPage({ params }: Props) {
   if (!clip) notFound();
 
   let signedUrl: string | null = null;
-  if (clip.storage_path) {
+  const localPath = parseLocalClipPath(clip.storage_path);
+  if (localPath) {
+    signedUrl = localClipProtocolUrl(localPath);
+  } else if (clip.storage_path) {
     const admin = createAdminClient();
     const { data } = await admin.storage.from("clips").createSignedUrl(clip.storage_path, 1800);
     signedUrl = data?.signedUrl ?? null;

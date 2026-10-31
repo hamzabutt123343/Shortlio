@@ -1,5 +1,6 @@
 import { handleRouteError, jsonError, jsonOk } from "@/lib/api";
 import { requireUser } from "@/lib/auth/session";
+import { localClipProtocolUrl, parseLocalClipPath } from "@/lib/local-clip-path";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 type Params = { params: Promise<{ id: string }> };
@@ -20,6 +21,15 @@ export async function GET(_request: Request, { params }: Params) {
     if (!clip) return jsonError("Clip not found", 404);
     if (clip.render_status !== "ready" || !clip.storage_path) {
       return jsonError("Clip is not ready for download", 400);
+    }
+
+    const localPath = parseLocalClipPath(clip.storage_path);
+    if (localPath) {
+      return jsonOk({
+        url: localClipProtocolUrl(localPath),
+        localPath,
+        expiresIn: 0,
+      });
     }
 
     const { data, error } = await admin.storage

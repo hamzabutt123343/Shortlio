@@ -1,14 +1,15 @@
 {
   "name": "shortlio-desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Shortlio Windows desktop shell — loads the hosted web app",
+  "description": "Shortlio Windows app — local video processing with bundled engine",
   "main": "src/main.js",
   "author": "Shortlio",
   "license": "UNLICENSED",
   "scripts": {
     "dev": "electron .",
     "start": "electron .",
+    "bundle:engine": "powershell -ExecutionPolicy Bypass -File ./scripts/bundle-engine.ps1",
     "dist:win": "electron-builder --win --x64",
     "pack": "electron-builder --win --x64 --dir"
   },
@@ -17,4 +18,3 @@
     "electron-builder": "^26.0.12"
   }
 }
-

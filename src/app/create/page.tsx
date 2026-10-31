@@ -1,9 +1,9 @@
 import { AppShell } from "@/components/app-shell";
+import { DesktopRequired } from "@/components/desktop-required";
 import { NewProjectForm } from "@/components/new-project-form";
 import { redirect } from "next/navigation";
 import { getSessionUser } from "@/lib/auth/session";
 import { getUsageInfo } from "@/lib/quota";
-import { getWorkerStatus } from "@/lib/worker-status";
 
 export default async function CreatePage({
   searchParams,
@@ -13,7 +13,6 @@ export default async function CreatePage({
   const user = await getSessionUser();
   if (!user) redirect("/login");
   const usage = await getUsageInfo(user.id);
-  const worker = await getWorkerStatus();
   const params = await searchParams;
 
   const usageLabel =
@@ -34,25 +33,18 @@ export default async function CreatePage({
           </h1>
           <p className="mt-1.5 text-sm text-[var(--text-muted)]">
             Import a public YouTube, Twitch, or Kick VOD/clip URL (or Live snapshot) and configure
-            captions, framing, and export.
+            captions, framing, and export. Processing runs on your PC in the Windows app.
           </p>
         </div>
 
-        {!worker.available && (
-          <div
-            role="alert"
-            className="rounded-[10px] border border-[var(--warning)]/30 bg-[var(--warning)]/10 px-4 py-3 text-sm text-[var(--warning)]"
-          >
-            {worker.message}
-          </div>
-        )}
-
-        <NewProjectForm
-          usage={usage}
-          initialPreset={params.preset}
-          initialFraming={params.framing}
-          initialLanguage={params.language}
-        />
+        <DesktopRequired>
+          <NewProjectForm
+            usage={usage}
+            initialPreset={params.preset}
+            initialFraming={params.framing}
+            initialLanguage={params.language}
+          />
+        </DesktopRequired>
       </div>
     </AppShell>
   );

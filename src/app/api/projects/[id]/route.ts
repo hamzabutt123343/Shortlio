@@ -77,7 +77,7 @@ export async function DELETE(_request: Request, { params }: Params) {
       .eq("project_id", id);
 
     for (const clip of clips ?? []) {
-      if (clip.storage_path) {
+      if (clip.storage_path && !String(clip.storage_path).startsWith("local:")) {
         await admin.storage.from("clips").remove([clip.storage_path]);
       }
     }

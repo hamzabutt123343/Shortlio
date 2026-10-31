@@ -1,6 +1,22 @@
-const { app, BrowserWindow, shell, session } = require("electron");
+const { app, BrowserWindow, shell, ipcMain, protocol } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const { pathToFileURL } = require("url");
+const engine = require("./engine");
+
+// Must register before app ready for custom schemes used by <video src>.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "shortlio-local",
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      bypassCSP: true,
+    },
+  },
+]);
 
 const DEFAULT_URL = "http://localhost:3000";
 /** Ignore same-URL full reloads that arrive faster than this (Next/Turbopack HMR thrash). */
@@ -30,9 +46,8 @@ function resolveAppUrl() {
 function isAllowedNavigation(targetUrl, appOrigin) {
   try {
     const u = new URL(targetUrl);
-    const app = new URL(appOrigin);
-    if (u.origin === app.origin) return true;
-    // Supabase auth / OAuth hosts — allow in-window; user stays in the shell.
+    const appOriginUrl = new URL(appOrigin);
+    if (u.origin === appOriginUrl.origin) return true;
     if (u.hostname.endsWith(".supabase.co")) return true;
     return false;
   } catch {
@@ -50,6 +65,15 @@ function sameDocumentUrl(a, b) {
   }
 }
 
+function registerIpc() {
+  ipcMain.handle("engine:status", () => engine.engineStatus());
+  ipcMain.handle("engine:runJob", (_event, payload) => engine.runJob(payload || {}));
+  ipcMain.handle("engine:cancel", (_event, payload) =>
+    engine.cancelJob(payload?.jobId || ""),
+  );
+  ipcMain.handle("shell:openClipsFolder", () => engine.openClipsFolder());
+}
+
 function createWindow() {
   const appUrl = resolveAppUrl();
   let lastMainNav = { url: "", at: 0 };
@@ -64,9 +88,10 @@ function createWindow() {
     autoHideMenuBar: true,
     show: false,
     webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
+      sandbox: false,
       spellcheck: false,
       backgroundThrottling: false,
     },
@@ -74,7 +99,6 @@ function createWindow() {
 
   win.once("ready-to-show", () => win.show());
 
-  // Never spawn child BrowserWindows — that looked like constant flicker with Next popups/HMR.
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedNavigation(url, appUrl)) {
       if (!sameDocumentUrl(win.webContents.getURL(), url)) {
@@ -93,7 +117,6 @@ function createWindow() {
       return;
     }
 
-    // Turbopack/Next full-reload loops fire will-navigate to the same URL repeatedly.
     const now = Date.now();
     const current = win.webContents.getURL();
     if (
@@ -107,7 +130,6 @@ function createWindow() {
     lastMainNav = { url, at: now };
   });
 
-  // Soft-guard location.reload from injected page scripts (HMR fallback).
   win.webContents.on("dom-ready", () => {
     void win.webContents
       .executeJavaScript(
@@ -147,12 +169,37 @@ if (!gotLock) {
   });
 
   app.whenReady().then(() => {
+    protocol.handle("shortlio-local", (request) => {
+      try {
+        let raw = request.url.replace(/^shortlio-local:\/\//, "");
+        // shortlio-local:///C:/path → /C:/path
+        if (raw.startsWith("/") && /^\/[a-zA-Z]:/.test(raw)) {
+          raw = raw.slice(1);
+        }
+        const filePath = decodeURIComponent(raw).replace(/\//g, path.sep);
+        if (!fs.existsSync(filePath)) {
+          return new Response("Not found", { status: 404 });
+        }
+        return netFetchFile(filePath);
+      } catch (err) {
+        console.error("shortlio-local protocol error", err);
+        return new Response("Bad request", { status: 400 });
+      }
+    });
+
+    registerIpc();
     createWindow();
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
   });
+
+  function netFetchFile(filePath) {
+    // Electron 35+: protocol.handle expects a Response / fetch-like result.
+    const { net } = require("electron");
+    return net.fetch(pathToFileURL(filePath).href);
+  }
 
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") app.quit();

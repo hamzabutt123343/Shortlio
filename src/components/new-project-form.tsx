@@ -18,6 +18,7 @@ import {
   cropSettingsForFramingMode,
   type FramingMode,
 } from "@/lib/framing";
+import { startDesktopJob } from "@/lib/start-desktop-job";
 import { CLIP_COUNT_OPTIONS, type UsageInfo } from "@/lib/types";
 import { detectPlatform, detectSourceKind } from "@/lib/validation/url";
 
@@ -131,8 +132,14 @@ export function NewProjectForm({
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to create project");
-      if (data.worker && !data.worker.available) {
-        setWorkerNote(data.worker.message);
+
+      if (data.job?.id) {
+        const engineNote = await startDesktopJob(String(data.job.id));
+        if (engineNote) setWorkerNote(engineNote);
+      } else {
+        setWorkerNote(
+          "Open this page in the Shortlio Windows app to process clips on your PC.",
+        );
       }
       router.push(`/projects/${data.project.id}`);
       router.refresh();

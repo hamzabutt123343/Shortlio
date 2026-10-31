@@ -12,6 +12,8 @@ from typing import Any
 from config import configure_logging, get_settings, validate_public_http_url
 from db import JobRepository
 from job_queue import WorkerQueue
+
+# HttpJobRepository is imported lazily in local_runner to avoid requiring SHORTLIO_API_URL.
 from pipeline.download import download_moment_segment
 from pipeline.live_capture import clamp_live_record_seconds, record_live_snapshot
 from pipeline.metadata import (
@@ -375,10 +377,14 @@ def _render_and_upload_clips(
     return clips_out
 
 
-def process_job(job: dict[str, Any]) -> None:
-    settings = get_settings()
-    repo = JobRepository(settings=settings)
-    job_id = str(job["id"])
+def process_job(
+    job: dict[str, Any],
+    *,
+    repo: Any | None = None,
+    settings: Any | None = None,
+) -> None:
+    settings = settings or get_settings()
+    repo = repo or JobRepository(settings=settings)
     payload = _job_payload(job)
     mode = str(payload.get("mode") or "full_pipeline")
 

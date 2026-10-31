@@ -2,6 +2,10 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 const STALE_MS = 90_000;
 
+/**
+ * Cloud/dev worker heartbeat check. Product processing runs in the Windows desktop
+ * engine — this is informational for operators who still run `worker/main.py`.
+ */
 export async function getWorkerStatus(): Promise<{
   available: boolean;
   lastSeenAt: string | null;
@@ -21,7 +25,7 @@ export async function getWorkerStatus(): Promise<{
         available: false,
         lastSeenAt: null,
         message:
-          "Video worker is offline. Jobs will stay queued until you start the worker process.",
+          "No cloud/dev worker heartbeat. Use the Shortlio Windows app to process clips on your PC.",
       };
     }
 
@@ -31,14 +35,14 @@ export async function getWorkerStatus(): Promise<{
         available: false,
         lastSeenAt: data.last_seen_at,
         message:
-          "Video worker has not reported recently. Queued jobs will not process until it is running.",
+          "Cloud/dev worker heartbeat is stale. Desktop users process jobs locally in the Windows app.",
       };
     }
 
     return {
       available: true,
       lastSeenAt: data.last_seen_at,
-      message: "Worker online",
+      message: "Dev/cloud worker online",
     };
   } catch {
     return {

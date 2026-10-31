@@ -32,6 +32,7 @@ import {
   type StackDirection,
 } from "@/lib/framing";
 import { ViralMetadataPanel } from "@/components/viral-metadata-panel";
+import { startDesktopJob } from "@/lib/start-desktop-job";
 import type { Clip } from "@/lib/types";
 import type { ViralMetadata } from "@/lib/viral-metadata/types";
 
@@ -337,12 +338,16 @@ export function ClipEditor({
       if (data.clip?.caption_settings && typeof data.clip.caption_settings === "object") {
         setCaptionSettings(data.clip.caption_settings as CaptionSettings);
       }
+      if (reRender && data.job?.id) {
+        const engineNote = await startDesktopJob(String(data.job.id));
+        if (engineNote) setError(engineNote);
+      }
       const mode = getCaptionStyleMode(nextSettings);
       setMessage(
         reRender
           ? mode === "preset"
-            ? `Preset applied & re-render queued (${nextPreset}). Keep this tab open — preview updates when ready.`
-            : "Fine-tune saved & re-render queued — preview updates when the new MP4 is ready."
+            ? `Preset applied & re-render started (${nextPreset}). Keep this window open — preview updates when ready.`
+            : "Fine-tune saved & re-render started — preview updates when the new MP4 is ready."
           : "Settings saved. Re-render to update the burned MP4 captions.",
       );
     } catch (err) {
@@ -358,6 +363,11 @@ export function ClipEditor({
     const data = await res.json();
     if (!res.ok) {
       setError(data.error || "Download failed");
+      return;
+    }
+    if (data.localPath && window.shortlioDesktop?.openClipsFolder) {
+      await window.shortlioDesktop.openClipsFolder();
+      setMessage(`Clip saved on this PC — opened Videos\\Shortlio.`);
       return;
     }
     window.open(data.url, "_blank", "noopener,noreferrer");

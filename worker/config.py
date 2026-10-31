@@ -21,8 +21,9 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-TranscriptionProvider = Literal["local_faster_whisper", "groq"]
+TranscriptionProvider = Literal["local_faster_whisper", "groq", "groq_proxy"]
 LLMProvider = Literal["heuristic", "groq", "gemini"]
+OutputMode = Literal["supabase", "local"]
 
 
 class Settings(BaseSettings):
@@ -32,8 +33,16 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    supabase_url: str = Field(alias="SUPABASE_URL")
-    supabase_service_role_key: str = Field(alias="SUPABASE_SERVICE_ROLE_KEY")
+    # Cloud/dev worker needs real Supabase service role. Desktop local_runner may
+    # set placeholders and talk to Next.js via SHORTLIO_API_URL + JWT instead.
+    supabase_url: str = Field(default="", alias="SUPABASE_URL")
+    supabase_service_role_key: str = Field(default="", alias="SUPABASE_SERVICE_ROLE_KEY")
+
+    shortlio_api_url: str = Field(default="", alias="SHORTLIO_API_URL")
+    shortlio_access_token: str = Field(default="", alias="SHORTLIO_ACCESS_TOKEN")
+    shortlio_token_file: str = Field(default="", alias="SHORTLIO_TOKEN_FILE")
+    output_dir: str = Field(default="", alias="OUTPUT_DIR")
+    output_mode: OutputMode = Field(default="supabase", alias="OUTPUT_MODE")
 
     worker_concurrency: int = Field(default=2, alias="WORKER_CONCURRENCY")
     worker_id: str = Field(default="", alias="WORKER_ID")
@@ -91,6 +100,28 @@ class Settings(BaseSettings):
         path = Path(base)
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def resolved_output_dir(self) -> Path:
+        base = self.output_dir.strip() or os.path.join(
+            os.path.expanduser("~"), "Videos", "Shortlio"
+        )
+        path = Path(base)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def uses_http_repo(self) -> bool:
+        return bool(self.shortlio_api_url.strip())
+
+    def read_access_token(self) -> str:
+        token_file = self.shortlio_token_file.strip()
+        if token_file:
+            try:
+                text = Path(token_file).read_text(encoding="utf-8").strip()
+                if text:
+                    return text
+            except OSError:
+                pass
+        return self.shortlio_access_token.strip()
 
     def resolved_ffmpeg(self) -> str:
         if self.ffmpeg_path.strip():

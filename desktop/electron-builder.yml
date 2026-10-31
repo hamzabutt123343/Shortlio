@@ -8,7 +8,28 @@ files:
   - src/**/*
   - app-config.json
   - package.json
+extraResources:
+  - from: resources/engine
+    to: engine
+    filter:
+      - "**/*"
+      - "!**/.venv/Lib/site-packages/**/__pycache__/**"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+  - from: resources/ffmpeg
+    to: ffmpeg
+    filter:
+      - "**/*"
+  - from: resources/node
+    to: node
+    filter:
+      - "**/*"
+  - from: resources/bin
+    to: bin
+    filter:
+      - "**/*"
 win:
+  icon: assets/icon.ico
   target:
     - target: nsis
       arch:
@@ -17,7 +38,6 @@ win:
       arch:
         - x64
   artifactName: Shortlio-${version}-${os}-${arch}.${ext}
-  # Optional: drop icon.ico / icon.png in assets/ for branded installer
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true

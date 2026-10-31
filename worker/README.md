@@ -1,6 +1,10 @@
-# Shortlio video worker
+# Shortlio video worker / desktop engine
 
-Python worker that claims jobs from Supabase PostgreSQL (`jobs` table), downloads source video, builds transcripts, picks viral moments, reframes to vertical/square, burns captions, and uploads clips to Supabase Storage (`clips` bucket).
+**Product path:** the Windows EXE runs `local_runner.py` per job (JWT → `/api/desktop/*`, clips → `Videos\Shortlio`). No always-on cloud worker required.
+
+**Dev/optional:** `python main.py` still polls Supabase with the service role for operator testing.
+
+Pipeline (yt-dlp, scout ASR, moments, OpenCV reframe, FFmpeg) is shared.
 
 ## Requirements
 

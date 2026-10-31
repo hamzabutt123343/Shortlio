@@ -488,6 +488,8 @@ def _transcribe_audio_file(
 ) -> list[TranscriptSegment]:
     if settings.transcription_provider == "groq":
         return transcribe_groq(audio, settings)
+    if settings.transcription_provider == "groq_proxy":
+        return transcribe_groq_proxy(audio, settings)
     return transcribe_local(audio, settings, on_progress=on_progress)
 
 
@@ -725,34 +727,11 @@ def transcribe_local(
     return out
 
 
-def transcribe_groq(audio_path: Path, settings: Settings | None = None) -> list[TranscriptSegment]:
-    settings = settings or get_settings()
-    if not settings.groq_api_key.strip():
-        raise RuntimeError("GROQ_API_KEY required for groq transcription")
-    with open(audio_path, "rb") as f:
-        files = {"file": (audio_path.name, f, "audio/m4a")}
-        # Request word timestamps when Groq supports them (verbose_json + granularities).
-        data = [
-            ("model", "whisper-large-v3"),
-            ("response_format", "verbose_json"),
-            ("timestamp_granularities[]", "word"),
-            ("timestamp_granularities[]", "segment"),
-        ]
-        headers = {"Authorization": f"Bearer {settings.groq_api_key}"}
-        with httpx.Client(timeout=600.0) as client:
-            resp = client.post(
-                "https://api.groq.com/openai/v1/audio/transcriptions",
-                headers=headers,
-                data=data,
-                files=files,
-            )
-            resp.raise_for_status()
-            payload = resp.json()
+def _segments_from_groq_payload(payload: dict) -> list[TranscriptSegment]:
     segments: list[TranscriptSegment] = []
     top_words = _words_from_payload(payload.get("words"))
     for seg in payload.get("segments") or []:
         segments.append(_segment_from_dict(seg, default_language=payload.get("language")))
-    # If segments lack words but the payload has a flat word list, attach by overlap.
     if top_words and segments and not any(s.words for s in segments):
         for i, seg in enumerate(segments):
             owned = [
@@ -780,6 +759,72 @@ def transcribe_groq(audio_path: Path, settings: Settings | None = None) -> list[
             )
         )
     return segments
+
+
+def transcribe_groq(audio_path: Path, settings: Settings | None = None) -> list[TranscriptSegment]:
+    settings = settings or get_settings()
+    if not settings.groq_api_key.strip():
+        raise RuntimeError("GROQ_API_KEY required for groq transcription")
+    with open(audio_path, "rb") as f:
+        files = {"file": (audio_path.name, f, "audio/m4a")}
+        # Request word timestamps when Groq supports them (verbose_json + granularities).
+        data = [
+            ("model", "whisper-large-v3"),
+            ("response_format", "verbose_json"),
+            ("timestamp_granularities[]", "word"),
+            ("timestamp_granularities[]", "segment"),
+        ]
+        headers = {"Authorization": f"Bearer {settings.groq_api_key}"}
+        with httpx.Client(timeout=600.0) as client:
+            resp = client.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers=headers,
+                data=data,
+                files=files,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+    return _segments_from_groq_payload(payload)
+
+
+def transcribe_groq_proxy(
+    audio_path: Path, settings: Settings | None = None
+) -> list[TranscriptSegment]:
+    """Desktop path: send audio to Next.js /api/desktop/ai/transcribe (server holds GROQ_API_KEY)."""
+    settings = settings or get_settings()
+    base = settings.shortlio_api_url.strip().rstrip("/")
+    token = settings.read_access_token()
+    if not base or not token:
+        raise RuntimeError(
+            "SHORTLIO_API_URL and access token required for groq_proxy transcription"
+        )
+    with open(audio_path, "rb") as f:
+        files = {"file": (audio_path.name, f, "audio/m4a")}
+        headers = {"Authorization": f"Bearer {token}"}
+        with httpx.Client(timeout=600.0) as client:
+            resp = client.post(
+                f"{base}/api/desktop/ai/transcribe",
+                headers=headers,
+                files=files,
+            )
+            if resp.status_code in (401, 402, 503) or (
+                resp.status_code >= 400
+                and "GROQ_API_KEY" in (resp.text or "")
+            ):
+                logger.warning(
+                    "groq_proxy unavailable (%s) — falling back to local faster-whisper",
+                    resp.status_code,
+                )
+                return transcribe_local(audio_path, settings)
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"groq_proxy failed ({resp.status_code}): {resp.text[:800]}"
+                )
+            body = resp.json()
+    payload = body.get("transcription") if isinstance(body, dict) else None
+    if not isinstance(payload, dict):
+        raise RuntimeError("groq_proxy returned unexpected payload")
+    return _segments_from_groq_payload(payload)
 
 
 def _words_from_payload(raw_words: Any) -> list[TranscriptWord] | None:

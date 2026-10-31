@@ -9,6 +9,11 @@ export const metadata: Metadata = {
   description:
     "Turn long videos into engaging Shorts, TikToks, and Reels with transcript-first analysis, smart reframing, and animated captions.",
   applicationName: "Shortlio",
+  icons: {
+    icon: [{ url: "/brand/shortlio-icon.png", type: "image/png" }],
+    apple: [{ url: "/brand/shortlio-icon.png" }],
+    shortcut: "/brand/shortlio-icon.png",
+  },
 };
 
 /**
