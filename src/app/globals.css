@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+/* Don't scan desktop/worker builds — those churn and can thrash the CSS pipeline. */
+@source not "../../desktop";
+@source not "../../worker";
+@source not "../../.next";
+
 :root {
   --bg: #0a0a0b;
   --bg-elevated: #111113;

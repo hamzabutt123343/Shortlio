@@ -42,11 +42,11 @@ export default async function ClipPage({ params }: Props) {
 
   return (
     <AppShell
-      planLabel={usage.plan === "pro" ? "Pro" : "Free"}
+      planLabel={usage.plan === "pro" ? "Pro" : "Basic"}
       usageLabel={
         usage.plan === "pro"
           ? "Pro · unlimited (fair use)"
-          : `Free · ${usage.remaining}/${usage.limit} clips left today`
+          : `Basic · ${usage.remaining}/${usage.limit} clips left today`
       }
       title={clip.title || "Clip editor"}
     >

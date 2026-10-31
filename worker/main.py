@@ -13,12 +13,25 @@ from config import configure_logging, get_settings, validate_public_http_url
 from db import JobRepository
 from job_queue import WorkerQueue
 from pipeline.download import download_moment_segment
-from pipeline.metadata import fetch_ytdlp_metadata, project_fields_from_metadata
+from pipeline.live_capture import clamp_live_record_seconds, record_live_snapshot
+from pipeline.metadata import (
+    fetch_source_probe,
+    fetch_ytdlp_metadata,
+    project_fields_from_metadata,
+    project_fields_from_probe,
+)
 from pipeline.moments import MomentCandidate, analyze_moments
 from pipeline.render import OUTPUT_PRESETS, render_moment_clip
+from pipeline.source_platform import SourceAccessError, assert_source_usable
 from pipeline.stages import ProgressStage, should_run_stage
 from pipeline.storage import ensure_bucket_exists, upload_clip
-from pipeline.transcript import TranscriptSegment, ensure_transcript, load_cached_transcript
+from pipeline.transcript import (
+    TranscriptSegment,
+    ensure_transcript,
+    load_cached_transcript,
+    refine_transcript_window,
+    save_transcript,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,10 +113,16 @@ def _load_or_build_transcript(
     check_cancel,
     settings,
     language_hint: str = "en",
+    local_media_path: Path | None = None,
+    time_range: tuple[float, float] | None = None,
+    source_duration: float | None = None,
 ) -> list[TranscriptSegment]:
     segments = load_cached_transcript(work_dir)
     from_db = False
-    if segments is None and project_id:
+    # Custom/scout windows must not reuse a stale full-VOD cache from a prior attempt.
+    if segments is not None and time_range is not None:
+        segments = None
+    if segments is None and project_id and time_range is None:
         db_segments = repo.fetch_transcript_segments(project_id)
         if db_segments:
             segments = db_segments
@@ -134,6 +153,9 @@ def _load_or_build_transcript(
             settings=settings,
             on_progress=_transcript_progress,
             language_hint=language_hint,
+            local_media_path=local_media_path,
+            time_range=time_range,
+            source_duration=source_duration,
         )
         if project_id:
             _persist_transcript(
@@ -206,6 +228,7 @@ def _render_and_upload_clips(
     caption_settings: dict[str, Any] | None = None,
     burn_captions: bool = True,
     crop_settings: dict[str, Any] | None = None,
+    local_media_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     repo.update_progress(job_id, progress_stage=ProgressStage.FETCHING_SELECTED_SEGMENTS, progress_pct=45)
     segment_paths: list[Path] = []
@@ -220,6 +243,7 @@ def _render_and_upload_clips(
             end=moment.end,
             index=i,
             settings=settings,
+            local_media_path=local_media_path,
         )
         segment_paths.append(seg_path)
         pct = 45 + (i + 1) / len(targets) * 15
@@ -280,14 +304,20 @@ def _render_and_upload_clips(
                 source_title = ""
                 source_channel = ""
                 source_uploader = ""
+                source_platform = ""
                 if project_id:
                     project_row = repo.get_project(project_id)
                     if project_row:
                         source_title = str(project_row.get("source_title") or "")
+                        source_platform = str(project_row.get("source_platform") or "")
                         source_meta = project_row.get("source_metadata") or {}
                         if isinstance(source_meta, dict):
                             source_channel = str(source_meta.get("channel") or "")
                             source_uploader = str(source_meta.get("uploader") or "")
+                            if not source_platform:
+                                source_platform = str(
+                                    source_meta.get("shortlio_platform") or ""
+                                )
                 viral_meta = generate_viral_metadata(
                     transcript=clip_text,
                     clip_title=moment.title,
@@ -297,6 +327,7 @@ def _render_and_upload_clips(
                     source_channel=source_channel,
                     source_uploader=source_uploader,
                     surrounding_context=surround,
+                    source_platform=source_platform,
                 )
             except Exception as meta_exc:
                 logger.warning("Viral metadata generation skipped: %s", meta_exc)
@@ -381,7 +412,12 @@ def _process_full_pipeline(
     project_id = _project_id(job, payload)
     user_id = _user_id(job, payload)
     clip_count = int(payload.get("clip_count", job.get("requested_clip_count", 3)))
-    max_clip_duration = float(payload.get("max_clip_duration", 60.0))
+    # User-selected target length (Auto≈45 … 3 min max). Clamp hard at 180s.
+    try:
+        max_clip_duration = float(payload.get("max_clip_duration", 45.0))
+    except (TypeError, ValueError):
+        max_clip_duration = 45.0
+    max_clip_duration = max(5.0, min(180.0, max_clip_duration))
     aspect = str(payload.get("aspect_ratio", "9:16"))
     caption_preset = str(payload.get("caption_preset", "classic_white"))
     language_hint = str(payload.get("language", "en"))
@@ -390,6 +426,9 @@ def _process_full_pipeline(
     burn_captions = bool(payload.get("burn_captions", True))
     crop_settings = payload.get("crop_settings") if isinstance(payload.get("crop_settings"), dict) else None
     cleanup = bool(payload.get("cleanup_temp", True))
+    clip_mode = str(payload.get("clip_mode") or "ai").strip().lower()
+    if clip_mode not in ("ai", "custom", "live_record"):
+        clip_mode = "ai"
 
     current_stage = job.get("progress_stage") or ProgressStage.FETCHING_TRANSCRIPT.value
     work_dir = settings.resolved_temp_dir() / job_id
@@ -403,6 +442,83 @@ def _process_full_pipeline(
     try:
         ensure_bucket_exists(settings)
 
+        # Probe Kick/Twitch/YouTube metadata before assuming a finite VOD timeline.
+        repo.update_progress(
+            job_id,
+            progress_stage=ProgressStage.FETCHING_TRANSCRIPT,
+            progress_pct=3,
+            partial_result={"phase": "source_probe"},
+        )
+        try:
+            probe = fetch_source_probe(source_url, settings, strict=False)
+            assert_source_usable(
+                probe,
+                clip_mode=clip_mode,
+                max_duration=(
+                    None
+                    if clip_mode in ("custom", "live_record")
+                    else float(settings.max_source_duration_seconds)
+                ),
+            )
+        except SourceAccessError as exc:
+            repo.mark_failed(job, str(exc))
+            return
+
+        if project_id:
+            fields = project_fields_from_probe(probe)
+            fields["source_platform"] = probe.platform
+            repo.update_project(project_id, fields)
+
+        # Live snapshot: record a short live window to a local file, then treat as finite media.
+        live_file: Path | None = None
+        if clip_mode == "live_record":
+            repo.update_progress(
+                job_id,
+                progress_stage=ProgressStage.FETCHING_TRANSCRIPT,
+                progress_pct=8,
+                partial_result={"phase": "live_snapshot", "platform": probe.platform},
+            )
+            live_seconds = clamp_live_record_seconds(payload.get("live_record_seconds"))
+            live_dir = work_dir / "live_capture"
+            live_file = record_live_snapshot(
+                source_url,
+                live_dir,
+                duration_seconds=live_seconds,
+                settings=settings,
+            )
+
+        # Custom: validate window first so we only Whisper that range (YT-speed for Kick/Twitch).
+        time_range: tuple[float, float] | None = None
+        custom_start = 0.0
+        custom_end = 0.0
+        if clip_mode == "custom":
+            try:
+                custom_start = float(payload.get("custom_start", 0))
+                custom_end = float(payload.get("custom_end", 0))
+            except (TypeError, ValueError):
+                repo.mark_failed(job, "Custom clip requires numeric custom_start and custom_end.")
+                return
+            if custom_end <= custom_start + 0.5:
+                repo.mark_failed(job, "Custom clip end must be greater than start (min ~0.5s).")
+                return
+            if custom_start < 0:
+                repo.mark_failed(job, "Custom clip start cannot be negative.")
+                return
+            if probe.duration and custom_end > probe.duration + 1.0:
+                repo.mark_failed(
+                    job,
+                    f"Custom end ({custom_end:.1f}s) exceeds source duration ({probe.duration:.1f}s).",
+                )
+                return
+            span = custom_end - custom_start
+            if span > max_clip_duration + 5:
+                repo.mark_failed(
+                    job,
+                    f"Custom clip is {span:.0f}s; max allowed is {max_clip_duration:.0f}s.",
+                )
+                return
+            time_range = (custom_start, custom_end)
+
         segments = _load_or_build_transcript(
             repo,
             job_id=job_id,
@@ -413,6 +529,9 @@ def _process_full_pipeline(
             check_cancel=check_cancel,
             settings=settings,
             language_hint=language_hint,
+            local_media_path=live_file,
+            time_range=time_range,
+            source_duration=probe.duration,
         )
         if not segments:
             return
@@ -421,7 +540,12 @@ def _process_full_pipeline(
             job_id,
             progress_stage=ProgressStage.ANALYZING_MOMENTS,
             progress_pct=25,
-            partial_result={"transcript_segment_count": len(segments)},
+            partial_result={
+                "transcript_segment_count": len(segments),
+                "source_platform": probe.platform,
+                "source_kind": probe.kind,
+                "clip_mode": clip_mode,
+            },
         )
 
         if check_cancel():
@@ -430,7 +554,40 @@ def _process_full_pipeline(
         existing_result = (repo.get_job(job_id) or {}).get("result") or {}
         moments_raw = existing_result.get("moments")
         analyzed_fresh = False
-        if moments_raw and isinstance(moments_raw, list):
+
+        if clip_mode == "custom":
+            candidates = [
+                MomentCandidate(
+                    start=custom_start,
+                    end=custom_end,
+                    title="Custom clip",
+                    hook="",
+                    score=1.0,
+                    explanation="User-selected start/end window",
+                )
+            ]
+            analyzed_fresh = True
+            clip_count = 1
+        elif clip_mode == "live_record":
+            # Whole captured window is the clip (absolute times from the snapshot file).
+            dur = max(
+                (segments[-1].end if segments else 0.0),
+                clamp_live_record_seconds(payload.get("live_record_seconds")) * 0.5,
+            )
+            end_t = min(dur, max_clip_duration) if dur > 0 else max_clip_duration
+            candidates = [
+                MomentCandidate(
+                    start=0.0,
+                    end=max(5.0, end_t),
+                    title=f"{probe.platform.title()} live snapshot",
+                    hook="",
+                    score=1.0,
+                    explanation="Recorded live window (not a VOD section)",
+                )
+            ]
+            analyzed_fresh = True
+            clip_count = 1
+        elif moments_raw and isinstance(moments_raw, list):
             candidates = [_moment_from_dict(m) for m in moments_raw]
         else:
             candidates = analyze_moments(
@@ -479,13 +636,52 @@ def _process_full_pipeline(
         if check_cancel():
             return
 
+        # Scout ASR is sparse — Whisper each selected window so captions match YouTube quality.
+        if live_file is None and burn_captions and clip_mode == "ai":
+            repo.update_progress(
+                job_id,
+                progress_stage=ProgressStage.TRANSCRIBING_AUDIO,
+                progress_pct=40,
+                partial_result={"phase": "caption_refine", "clip_count": len(targets)},
+            )
+            for i, target in enumerate(targets):
+                if check_cancel():
+                    return
+                segments = refine_transcript_window(
+                    source_url,
+                    work_dir,
+                    segments,
+                    target.moment.start,
+                    target.moment.end,
+                    settings=settings,
+                )
+                repo.update_progress(
+                    job_id,
+                    progress_stage=ProgressStage.TRANSCRIBING_AUDIO,
+                    progress_pct=40 + (i + 1) / max(1, len(targets)) * 4,
+                )
+            save_transcript(work_dir, segments)
+            if project_id:
+                _persist_transcript(
+                    repo,
+                    project_id=project_id,
+                    source_url=source_url,
+                    segments=segments,
+                    settings=settings,
+                )
+
+        # For live snapshots, segment download must use the local file — not the live URL.
+        render_source = source_url
+        if live_file is not None:
+            render_source = str(live_file)
+
         clips_out = _render_and_upload_clips(
             repo,
             job=job,
             job_id=job_id,
             user_id=user_id,
             project_id=project_id,
-            source_url=source_url,
+            source_url=render_source,
             segments=segments,
             targets=targets,
             aspect=aspect,
@@ -498,6 +694,7 @@ def _process_full_pipeline(
             caption_settings=caption_settings,
             burn_captions=burn_captions,
             crop_settings=crop_settings,
+            local_media_path=live_file,
         )
         if check_cancel() or not clips_out:
             return
@@ -509,6 +706,9 @@ def _process_full_pipeline(
                 "source_url": source_url,
                 "aspect_ratio": aspect,
                 "caption_preset": caption_preset,
+                "source_platform": probe.platform,
+                "source_kind": probe.kind,
+                "clip_mode": clip_mode,
             },
         )
         logger.info("Job %s ready (%d clips)", job_id, len(clips_out))
@@ -516,6 +716,9 @@ def _process_full_pipeline(
         if cleanup:
             _cleanup_job_temp(job_id)
 
+    except SourceAccessError as exc:
+        logger.warning("Job %s source rejected: %s", job_id, exc)
+        repo.mark_failed(job, str(exc))
     except Exception as exc:
         logger.exception("Job %s failed", job_id)
         repo.mark_failed(job, str(exc))

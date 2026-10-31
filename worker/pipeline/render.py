@@ -31,10 +31,11 @@ OUTPUT_PRESETS = {
 }
 
 QUALITY_PRESETS = {
-    "draft": {"preset": "ultrafast", "crf": "28", "audio_bitrate": "128k", "scale": 0.75},
-    "fast": {"preset": "ultrafast", "crf": "28", "audio_bitrate": "128k", "scale": 0.75},
-    "balanced": {"preset": "veryfast", "crf": "23", "audio_bitrate": "160k", "scale": 1.0},
-    "high": {"preset": "faster", "crf": "20", "audio_bitrate": "192k", "scale": 1.0},
+    # Keep drafts under Supabase Free ~50MB even for ~3 min vertical clips.
+    "draft": {"preset": "veryfast", "crf": "30", "audio_bitrate": "96k", "scale": 0.67},
+    "fast": {"preset": "veryfast", "crf": "29", "audio_bitrate": "96k", "scale": 0.67},
+    "balanced": {"preset": "veryfast", "crf": "24", "audio_bitrate": "128k", "scale": 0.85},
+    "high": {"preset": "faster", "crf": "22", "audio_bitrate": "160k", "scale": 1.0},
 }
 
 

@@ -409,6 +409,218 @@ def download_audio_only(url: str, work_dir: Path, settings: Settings | None = No
     return out
 
 
+def download_audio_section(
+    url: str,
+    work_dir: Path,
+    start: float,
+    end: float,
+    *,
+    settings: Settings | None = None,
+    stem: str = "section_audio",
+) -> Path:
+    """Download only [start, end] as audio — used for custom windows and Kick/Twitch scout ASR."""
+    settings = settings or get_settings()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    start = max(0.0, float(start))
+    end = max(start + 0.5, float(end))
+    out = work_dir / f"{stem}.m4a"
+    if out.exists() and out.stat().st_size > 0:
+        return out
+    section = f"*{start:.3f}-{end:.3f}"
+    cmd = [
+        *ytdlp_base_args(settings),
+        "--download-sections",
+        section,
+        "-f",
+        "bestaudio[acodec*=mp4]/bestaudio/best",
+        "--extract-audio",
+        "--audio-format",
+        "m4a",
+        "--audio-quality",
+        "7",
+        "-o",
+        str((work_dir / stem).with_suffix(".%(ext)s")),
+        url,
+    ]
+    run_subprocess(cmd, timeout=900)
+    if out.exists() and out.stat().st_size > 0:
+        return out
+    candidates = sorted(work_dir.glob(f"{stem}.*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for candidate in candidates:
+        if candidate.suffix.lower() in {".m4a", ".mp3", ".webm", ".opus", ".ogg", ".wav"}:
+            if candidate.resolve() != out.resolve():
+                try:
+                    candidate.replace(out)
+                except OSError:
+                    return candidate
+            return out if out.exists() else candidate
+    raise RuntimeError(f"Audio section download produced no file ({start:.1f}-{end:.1f}s)")
+
+
+def _offset_segments(segments: list[TranscriptSegment], offset: float) -> list[TranscriptSegment]:
+    if abs(offset) < 1e-6:
+        return segments
+    out: list[TranscriptSegment] = []
+    for seg in segments:
+        words = None
+        if seg.words:
+            words = [
+                TranscriptWord(word=w.word, start=w.start + offset, end=w.end + offset)
+                for w in seg.words
+            ]
+        out.append(
+            TranscriptSegment(
+                start=seg.start + offset,
+                end=seg.end + offset,
+                text=seg.text,
+                speaker=seg.speaker,
+                language=seg.language,
+                words=words,
+            )
+        )
+    return out
+
+
+def _transcribe_audio_file(
+    audio: Path,
+    settings: Settings,
+    on_progress: ProgressCb | None = None,
+) -> list[TranscriptSegment]:
+    if settings.transcription_provider == "groq":
+        return transcribe_groq(audio, settings)
+    return transcribe_local(audio, settings, on_progress=on_progress)
+
+
+def _scout_windows(
+    duration: float,
+    *,
+    budget: float,
+    chunk: float,
+) -> list[tuple[float, float]]:
+    """Evenly sample short windows across a long VOD (total audio ≈ budget)."""
+    duration = max(0.0, float(duration))
+    budget = max(60.0, float(budget))
+    chunk = max(30.0, min(float(chunk), budget))
+    if duration <= 0:
+        return [(0.0, chunk)]
+    if duration <= budget:
+        return [(0.0, duration)]
+    n = max(2, int(budget // chunk))
+    usable = max(0.0, duration - chunk)
+    windows: list[tuple[float, float]] = []
+    for i in range(n):
+        start = (usable * i / (n - 1)) if n > 1 else 0.0
+        end = min(duration, start + chunk)
+        if end - start >= 5.0:
+            windows.append((start, end))
+    return windows or [(0.0, min(duration, chunk))]
+
+
+def build_scout_transcript(
+    url: str,
+    work_dir: Path,
+    duration: float,
+    *,
+    settings: Settings | None = None,
+    on_progress: ProgressCb | None = None,
+) -> list[TranscriptSegment]:
+    """Whisper spaced samples across a long Kick/Twitch VOD — same later stages as YouTube."""
+    settings = settings or get_settings()
+    windows = _scout_windows(
+        duration,
+        budget=float(settings.asr_scout_budget_seconds),
+        chunk=float(settings.asr_scout_chunk_seconds),
+    )
+    logger.info(
+        "Scout ASR: %d windows (budget=%.0fs) over %.0fs VOD",
+        len(windows),
+        settings.asr_scout_budget_seconds,
+        duration,
+    )
+    all_segments: list[TranscriptSegment] = []
+    scout_dir = work_dir / "scout_audio"
+    scout_dir.mkdir(parents=True, exist_ok=True)
+    for i, (start, end) in enumerate(windows):
+        if on_progress:
+            pct = 10.0 + (i / max(1, len(windows))) * 20.0
+            on_progress(pct, "transcribing_audio")
+        stem = f"scout_{i:02d}_{int(start)}"
+        try:
+            audio = download_audio_section(
+                url, scout_dir, start, end, settings=settings, stem=stem
+            )
+        except Exception as exc:
+            logger.warning("Scout window %.1f-%.1f download failed: %s", start, end, exc)
+            continue
+        try:
+            segs = _transcribe_audio_file(audio, settings)
+        except Exception as exc:
+            logger.warning("Scout window %.1f-%.1f whisper failed: %s", start, end, exc)
+            continue
+        all_segments.extend(_offset_segments(segs, start))
+    all_segments.sort(key=lambda s: s.start)
+    if on_progress:
+        on_progress(32.0, "transcribing_audio")
+    return all_segments
+
+
+def window_coverage_ratio(
+    segments: list[TranscriptSegment], start: float, end: float
+) -> float:
+    span = max(0.1, end - start)
+    covered = 0.0
+    for seg in segments:
+        a = max(seg.start, start)
+        b = min(seg.end, end)
+        if b > a:
+            covered += b - a
+    return min(1.0, covered / span)
+
+
+def merge_transcript_window(
+    existing: list[TranscriptSegment],
+    window_segments: list[TranscriptSegment],
+    start: float,
+    end: float,
+) -> list[TranscriptSegment]:
+    """Replace transcript inside [start, end] with freshly whispered segments."""
+    kept = [s for s in existing if s.end <= start + 0.05 or s.start >= end - 0.05]
+    merged = kept + window_segments
+    merged.sort(key=lambda s: s.start)
+    return merged
+
+
+def refine_transcript_window(
+    url: str,
+    work_dir: Path,
+    segments: list[TranscriptSegment],
+    start: float,
+    end: float,
+    *,
+    settings: Settings | None = None,
+    pad: float = 1.0,
+) -> list[TranscriptSegment]:
+    """Ensure dense captions for a selected clip window (scout transcripts are sparse)."""
+    settings = settings or get_settings()
+    start_p = max(0.0, start - pad)
+    end_p = end + pad
+    if window_coverage_ratio(segments, start, end) >= 0.55:
+        return segments
+    refine_dir = work_dir / "refine_audio"
+    stem = f"refine_{int(start_p)}_{int(end_p)}"
+    try:
+        audio = download_audio_section(
+            url, refine_dir, start_p, end_p, settings=settings, stem=stem
+        )
+        fresh = _offset_segments(_transcribe_audio_file(audio, settings), start_p)
+    except Exception as exc:
+        logger.warning("Caption refine %.1f-%.1f failed: %s", start, end, exc)
+        return segments
+    if not fresh:
+        return segments
+    return merge_transcript_window(segments, fresh, start_p, end_p)
+
+
 _whisper_model = None
 _whisper_batched = None
 
@@ -621,6 +833,36 @@ def save_transcript(work_dir: Path, segments: list[TranscriptSegment]) -> Path:
     return path
 
 
+def extract_audio_from_media(
+    media_path: Path,
+    work_dir: Path,
+    settings: Settings | None = None,
+) -> Path:
+    """Pull AAC/m4a audio from a local video/audio file for Whisper."""
+    settings = settings or get_settings()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    out = work_dir / "source_audio.m4a"
+    if out.exists() and out.stat().st_size > 0:
+        return out
+    ffmpeg = settings.resolved_ffmpeg()
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(media_path),
+        "-vn",
+        "-acodec",
+        "aac",
+        "-b:a",
+        "96k",
+        str(out),
+    ]
+    run_subprocess(cmd, timeout=600)
+    if not out.exists() or out.stat().st_size == 0:
+        raise RuntimeError(f"Could not extract audio from {media_path}")
+    return out
+
+
 def ensure_transcript(
     *,
     job_id: str,
@@ -628,37 +870,93 @@ def ensure_transcript(
     settings: Settings | None = None,
     on_progress: ProgressCb | None = None,
     language_hint: str = "en",
+    local_media_path: Path | None = None,
+    time_range: tuple[float, float] | None = None,
+    source_duration: float | None = None,
 ) -> list[TranscriptSegment]:
+    """Build a transcript the same way for every platform: captions if any → else ASR → moments.
+
+    YouTube usually returns captions in seconds. Kick/Twitch have no free captions, so we:
+    - Custom clip: Whisper only the selected window
+    - AI on long VODs: scout-sample ≤ ASR_SCOUT_BUDGET_SECONDS across the stream
+    - Short VODs: Whisper the full audio (same as YouTube fallback)
+    """
     settings = settings or get_settings()
-    url = validate_public_http_url(source_url)
     work_dir = _job_dir(settings.resolved_temp_dir(), job_id)
 
     cached = load_cached_transcript(work_dir)
     if cached:
         return cached
 
-    # 1) Fast path: HTTP captions from YouTube player (seconds)
+    # Local media (e.g. live snapshot) — skip remote caption extractors.
+    if local_media_path is not None:
+        if on_progress:
+            on_progress(10.0, "transcribing_audio")
+        audio = extract_audio_from_media(local_media_path, work_dir, settings)
+        segments = _transcribe_audio_file(audio, settings, on_progress=on_progress)
+        if not segments:
+            raise RuntimeError("Transcription produced no segments")
+        save_transcript(work_dir, segments)
+        return segments
+
+    url = validate_public_http_url(source_url)
+    is_yt = is_youtube_url(url)
+
+    # Custom window: only ASR the selected range (Kick/Twitch/YouTube).
+    if time_range is not None:
+        start, end = time_range
+        if on_progress:
+            on_progress(10.0, "transcribing_audio")
+        audio = download_audio_section(
+            url, work_dir, start, end, settings=settings, stem="custom_audio"
+        )
+        segments = _offset_segments(
+            _transcribe_audio_file(audio, settings, on_progress=on_progress),
+            max(0.0, float(start)),
+        )
+        if not segments:
+            raise RuntimeError("Transcription produced no segments")
+        save_transcript(work_dir, segments)
+        return segments
+
+    # 1) YouTube-only: HTTP captions (seconds)
     if on_progress:
         on_progress(6.0, "fetching_transcript")
-    segments = fetch_youtube_captions_http(url, language_hint=language_hint)
-    if segments:
-        save_transcript(work_dir, segments)
-        return segments
+    if is_yt:
+        segments = fetch_youtube_captions_http(url, language_hint=language_hint)
+        if segments:
+            save_transcript(work_dir, segments)
+            return segments
+        # 2) yt-dlp subtitles (YouTube only — wasted round-trip on Kick/Twitch)
+        segments = fetch_youtube_subtitles(url, work_dir, settings=settings)
+        if segments:
+            save_transcript(work_dir, segments)
+            return segments
 
-    # 2) yt-dlp subtitle download
-    segments = fetch_youtube_subtitles(url, work_dir, settings=settings)
-    if segments:
-        save_transcript(work_dir, segments)
-        return segments
-
-    # 3) Slow path: download audio + Whisper
+    # 3) ASR path (Kick/Twitch default; YouTube fallback)
     if on_progress:
         on_progress(10.0, "transcribing_audio")
+
+    duration = float(source_duration or 0.0)
+    full_max = float(settings.asr_full_max_seconds)
+    # Long non-YouTube VODs: sample audio across the stream instead of Whispering hours.
+    if (not is_yt) and duration > full_max:
+        segments = build_scout_transcript(
+            url,
+            work_dir,
+            duration,
+            settings=settings,
+            on_progress=on_progress,
+        )
+        if not segments:
+            raise RuntimeError(
+                "Scout transcription produced no segments. Try Custom clip with a shorter window."
+            )
+        save_transcript(work_dir, segments)
+        return segments
+
     audio = download_audio_only(url, work_dir, settings=settings)
-    if settings.transcription_provider == "groq":
-        segments = transcribe_groq(audio, settings)
-    else:
-        segments = transcribe_local(audio, settings, on_progress=on_progress)
+    segments = _transcribe_audio_file(audio, settings, on_progress=on_progress)
 
     if not segments:
         raise RuntimeError("Transcription produced no segments")

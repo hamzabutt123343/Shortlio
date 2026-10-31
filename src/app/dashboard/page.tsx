@@ -27,11 +27,11 @@ export default async function DashboardPage() {
   const usageLabel =
     usage.plan === "pro"
       ? "Pro · unlimited (fair use)"
-      : `Free · ${usage.remaining}/${usage.limit} clips left today`;
+      : `Basic · ${usage.remaining}/${usage.limit} clips left today`;
 
   return (
     <AppShell
-      planLabel={usage.plan === "pro" ? "Pro" : "Free"}
+      planLabel={usage.plan === "pro" ? "Pro" : "Basic"}
       usageLabel={usageLabel}
       title="Dashboard"
     >
@@ -69,7 +69,7 @@ export default async function DashboardPage() {
             </p>
             <Link href="/billing">
               <Button variant="secondary" className="text-xs">
-                Upgrade to Pro
+                Upgrade — Rs 500 lifetime
               </Button>
             </Link>
           </div>

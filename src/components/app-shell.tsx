@@ -132,7 +132,7 @@ export function AppShell({
             {usageLabel && (
               <p className="hidden text-xs text-[var(--text-muted)] lg:block">{usageLabel}</p>
             )}
-            {planLabel === "Free" && (
+            {planLabel === "Basic" && (
               <Link href="/billing" className="hidden sm:block">
                 <Button variant="secondary" className="px-3 py-1.5 text-xs">
                   Upgrade

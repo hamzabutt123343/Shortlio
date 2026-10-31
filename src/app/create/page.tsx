@@ -19,11 +19,11 @@ export default async function CreatePage({
   const usageLabel =
     usage.plan === "pro"
       ? "Pro · unlimited (fair use)"
-      : `Free · ${usage.remaining}/${usage.limit} clips left today`;
+      : `Basic · ${usage.remaining}/${usage.limit} clips left today`;
 
   return (
     <AppShell
-      planLabel={usage.plan === "pro" ? "Pro" : "Free"}
+      planLabel={usage.plan === "pro" ? "Pro" : "Basic"}
       usageLabel={usageLabel}
       title="Create Clips"
     >
@@ -33,7 +33,8 @@ export default async function CreatePage({
             Create New Clips
           </h1>
           <p className="mt-1.5 text-sm text-[var(--text-muted)]">
-            Import a public YouTube URL and configure captions, framing, and export format.
+            Import a public YouTube, Twitch, or Kick VOD/clip URL (or Live snapshot) and configure
+            captions, framing, and export.
           </p>
         </div>
 

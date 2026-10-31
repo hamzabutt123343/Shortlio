@@ -145,8 +145,74 @@ _SIGNAL_GROUPS: list[tuple[str, tuple[str, ...], float]] = [
             "roast",
             "troll",
             "prank",
+            "bro fell",
+            "sheesh",
+            "skill issue",
+            "copium",
+            "ratio",
         ),
         0.09,
+    ),
+    (
+        "stream_reaction",
+        (
+            "chat",
+            "chat is",
+            "in the chat",
+            "donated",
+            "donation",
+            "subscribe",
+            "subscribed",
+            "subbed",
+            "gift sub",
+            "gifted",
+            "raid",
+            "raided",
+            "hosting",
+            "hype train",
+            "bits",
+            "pog",
+            "poggers",
+            "kappa",
+            "clip it",
+            "clip that",
+            "someone clip",
+            "mods",
+            "timeout",
+            "banned",
+            "emote",
+            "lurking",
+            "first time chatter",
+            "kick",
+            "twitch",
+        ),
+        0.11,
+    ),
+    (
+        "game_moment",
+        (
+            "clutch",
+            "ace",
+            "headshot",
+            "one tap",
+            "no scope",
+            "flawless",
+            "gg",
+            "ez",
+            "throw",
+            "diff",
+            "carry",
+            "nerf",
+            "buff",
+            "boss fight",
+            "final boss",
+            "speedrun",
+            "pb",
+            "world record",
+            "died",
+            "respawn",
+        ),
+        0.08,
     ),
     (
         "stakes",
@@ -296,7 +362,9 @@ def _sliding_windows(
     if t1 <= t0:
         return []
     windows: list[tuple[float, float, str]] = []
-    target = max(12.0, min(max_duration, 45.0))
+    # Honor user max length (45s–180s); previously hard-capped at 45s.
+    target = max(12.0, min(float(max_duration), 180.0))
+    stride = max(8.0, min(float(step), target * 0.25))
     cur = t0
     while cur < t1:
         end = min(t1, cur + target)
@@ -309,7 +377,7 @@ def _sliding_windows(
             windows.append((cur, end, text))
         if end >= t1:
             break
-        cur += step
+        cur += stride
     return windows
 
 
@@ -367,13 +435,17 @@ def _score_text(text: str, *, duration: float) -> tuple[float, list[str]]:
         score -= 0.08
         reasons.append("filler_heavy")
 
-    # Ideal short-form length (~18–45s)
-    if 15.0 <= duration <= 45.0:
+    # Prefer Shorts-friendly length; allow up to 3 min without hard penalty
+    # (user can request 1–3 min via max_clip_duration).
+    if 15.0 <= duration <= 60.0:
         score += 0.07
         reasons.append("ideal_len")
-    elif duration < 10.0 or duration > 70.0:
+    elif duration < 10.0 or duration > 180.0:
         score -= 0.06
         reasons.append("awkward_len")
+    elif duration > 120.0:
+        score -= 0.02
+        reasons.append("long_clip")
 
     # Payoff near the end of the window
     tail = lower[max(0, len(lower) - 140) :]
@@ -658,7 +730,7 @@ def _parse_llm_moments(
     *,
     clip_count: int,
     segments: list[TranscriptSegment] | None = None,
-    max_clip_duration: float = 60.0,
+    max_clip_duration: float = 45.0,
 ) -> list[MomentCandidate]:
     text = raw.strip()
     if text.startswith("```"):
@@ -721,7 +793,7 @@ def analyze_moments(
     segments: list[TranscriptSegment],
     *,
     clip_count: int = 3,
-    max_clip_duration: float = 60.0,
+    max_clip_duration: float = 45.0,
     settings: Settings | None = None,
 ) -> list[MomentCandidate]:
     settings = settings or get_settings()

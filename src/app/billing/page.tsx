@@ -3,13 +3,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { Button, Card } from "@/components/ui";
+import { DISCORD_INVITE_URL, PLAN_COPY } from "@/lib/pricing";
 import type { UsageInfo } from "@/lib/types";
 
 export default function BillingPage() {
   const [usage, setUsage] = useState<UsageInfo | null>(null);
-  const [subscription, setSubscription] = useState<Record<string, unknown> | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
   const [ready, setReady] = useState(false);
 
   const load = useCallback(async () => {
@@ -20,7 +18,6 @@ export default function BillingPage() {
     }
     const data = await res.json();
     setUsage(data.usage);
-    setSubscription(data.subscription);
     setReady(true);
   }, []);
 
@@ -31,44 +28,19 @@ export default function BillingPage() {
     return () => cancelAnimationFrame(id);
   }, [load]);
 
-  async function checkout() {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/billing/checkout", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Checkout failed");
-      window.location.href = data.url;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Checkout failed");
-      setLoading(false);
-    }
-  }
-
-  async function portal() {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/billing/portal", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Portal unavailable");
-      window.location.href = data.url;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Portal failed");
-      setLoading(false);
-    }
-  }
+  const free = PLAN_COPY.free;
+  const pro = PLAN_COPY.pro;
 
   return (
-    <AppShell planLabel={usage?.plan === "pro" ? "Pro" : "Free"} title="Billing">
+    <AppShell planLabel={usage?.plan === "pro" ? "Pro" : "Basic"} title="Billing">
       <div className="mx-auto max-w-2xl space-y-6">
         <h1 className="font-[family-name:var(--font-display)] text-3xl font-bold tracking-tight">
           Billing
         </h1>
         <Card>
           <p className="text-sm text-[var(--text-muted)]">Current plan</p>
-          <p className="mt-1 font-[family-name:var(--font-display)] text-3xl font-bold capitalize">
-            {!ready ? "…" : (usage?.plan ?? "free")}
+          <p className="mt-1 font-[family-name:var(--font-display)] text-3xl font-bold">
+            {!ready ? "…" : usage?.plan === "pro" ? "Pro" : "Basic (Free)"}
           </p>
           {usage?.plan === "free" && (
             <p className="mt-2 text-sm text-[var(--text-muted)]">
@@ -78,27 +50,42 @@ export default function BillingPage() {
           )}
           {usage?.plan === "pro" && (
             <p className="mt-2 text-sm text-[var(--text-muted)]">
-              Unlimited clip generation subject to fair-use and infrastructure capacity.
-              {subscription?.current_period_end
-                ? ` Renews/ends ${new Date(String(subscription.current_period_end)).toUTCString()}.`
-                : ""}
+              Lifetime Pro — unlimited clip generation subject to fair-use and capacity.
             </p>
           )}
-          {error && <p className="mt-3 text-sm text-[var(--danger)]">{error}</p>}
-          <div className="mt-6 flex flex-wrap gap-2">
-            {usage?.plan !== "pro" ? (
-              <Button onClick={checkout} disabled={loading || !ready}>
-                {loading ? "Redirecting…" : "Upgrade to Pro — $10/mo"}
-              </Button>
-            ) : (
-              <Button variant="secondary" onClick={portal} disabled={loading}>
-                Manage subscription
-              </Button>
-            )}
-          </div>
-          <p className="mt-4 text-xs text-[var(--text-muted)]">
-            Billing uses the provider configured in BILLING_PROVIDER (Lemon Squeezy by default, Stripe
-            optional). Card details are never stored by Shortlio. Use test mode keys during development.
+
+          {usage?.plan !== "pro" && (
+            <div className="mt-6 space-y-3 rounded-[10px] border border-[var(--border)] bg-[var(--bg)]/50 p-4">
+              <p className="font-[family-name:var(--font-display)] text-lg font-semibold">
+                Upgrade to {pro.name} — {pro.priceLabel} {pro.priceDetail}
+              </p>
+              <p className="text-sm text-[var(--text-muted)]">
+                Purchases are handled on Discord. Join the server, request Pro, and we activate your
+                account after payment.
+              </p>
+              <ul className="space-y-1.5 text-sm text-[var(--text-muted)]">
+                {pro.features.map((f) => (
+                  <li key={f}>• {f}</li>
+                ))}
+              </ul>
+              <a href={DISCORD_INVITE_URL} target="_blank" rel="noopener noreferrer">
+                <Button className="mt-2">Buy Pro on Discord</Button>
+              </a>
+            </div>
+          )}
+
+          <p className="mt-6 text-xs text-[var(--text-muted)]">
+            {free.name} stays free forever with a daily clip limit. Pro is a one-time Rs 500 lifetime
+            purchase via{" "}
+            <a
+              href={DISCORD_INVITE_URL}
+              className="text-[var(--accent)] underline-offset-2 hover:underline"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Discord
+            </a>
+            — no card stored in Shortlio.
           </p>
         </Card>
       </div>

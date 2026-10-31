@@ -145,12 +145,14 @@ Manual runs: **Actions → Desktop Windows release → Run workflow** (uploads a
 
 | Plan | Price | Limits |
 |------|-------|--------|
-| Free | $0 | 3 **successful** clips per **UTC** day (server-enforced) |
-| Pro | $10/mo | Unlimited under fair-use / capacity (no daily UI counter) |
+| Basic (Free) | Free | 3 **successful** clips per **UTC** day (server-enforced) |
+| Pro | **Rs 500 lifetime** | Unlimited under fair-use / capacity (no daily UI counter) |
+
+Purchases are handled on Discord: [discord.gg/yaWrgpnya5](https://discord.gg/yaWrgpnya5). After payment, activate the user’s plan in Supabase (`profiles.plan` / subscriptions) — card checkout is not required for the Discord flow.
 
 Failed/cancelled jobs release reservations and do not permanently consume successful-clip quota.
 
-Billing adapter: `BILLING_PROVIDER=lemon_squeezy` (default) or `stripe`. Configure test-mode keys only in development. Webhooks are signature-verified and idempotent via `billing_events`.
+Legacy card adapters (`BILLING_PROVIDER=lemon_squeezy` / `stripe`) remain in the codebase but the product UI points buyers to Discord.
 
 ## Pipeline (honest behavior)
 

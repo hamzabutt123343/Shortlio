@@ -370,6 +370,17 @@ def _hashtags(keywords: list[str], language: str, extra: list[str]) -> list[str]
     return tags[:12]
 
 
+def _source_platform_tags(source_platform: str) -> list[str]:
+    p = (source_platform or "").lower().strip()
+    if p == "twitch":
+        return ["twitch", "twitchclips", "livestream", "streamer"]
+    if p == "kick":
+        return ["kick", "kickstreaming", "livestream", "streamer"]
+    if p == "youtube":
+        return ["youtube", "shorts"]
+    return []
+
+
 def _heuristic_payload(
     *,
     transcript: str,
@@ -379,6 +390,7 @@ def _heuristic_payload(
     source_channel: str = "",
     source_uploader: str = "",
     surrounding_context: str = "",
+    source_platform: str = "",
 ) -> dict[str, Any]:
     text = (transcript or surrounding_context or clip_title or source_title).strip()
     creator = _extract_creator(
@@ -411,13 +423,22 @@ def _heuristic_payload(
     )
 
     creator_tag = re.sub(r"\s+", "", creator) if creator else ""
+    stream_tags = _source_platform_tags(source_platform)
     platform_tags = _hashtags(
-        [creator_tag, *kws] if creator_tag else kws,
+        [creator_tag, *kws, *stream_tags] if creator_tag else [*kws, *stream_tags],
         language,
-        ["shorts", "viral", "fyp", *([creator_tag] if creator_tag else [])],
+        ["shorts", "viral", "fyp", *stream_tags, *([creator_tag] if creator_tag else [])],
     )
     yt_tags = list(
-        dict.fromkeys([*( [creator] if creator else [] ), *kws, "shorts", "youtube shorts"])
+        dict.fromkeys(
+            [
+                *([creator] if creator else []),
+                *kws,
+                *stream_tags,
+                "shorts",
+                "youtube shorts",
+            ]
+        )
     )[:15]
 
     yt_desc = "\n\n".join(
@@ -674,6 +695,7 @@ def generate_viral_metadata(
     source_channel: str = "",
     source_uploader: str = "",
     surrounding_context: str = "",
+    source_platform: str = "",
 ) -> dict[str, Any]:
     """Generate platform metadata from clip transcript + source context. Never re-transcribes."""
     settings = settings or get_settings()
@@ -690,6 +712,7 @@ def generate_viral_metadata(
         source_channel=channel,
         source_uploader=source_uploader or "",
         surrounding_context=surrounding_context or "",
+        source_platform=source_platform or "",
     )
 
     payload: dict[str, Any]

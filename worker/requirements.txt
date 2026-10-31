@@ -3,7 +3,9 @@ httpx==0.28.1
 pydantic==2.10.6
 pydantic-settings==2.7.1
 python-dotenv==1.0.1
-yt-dlp>=2025.1.26
+# Kick/Twitch need curl_cffi impersonation; Kick VODs need yt-dlp>=2026.10.21 (API rework).
+yt-dlp[default]>=2026.10.21
+curl-cffi>=0.13.0
 faster-whisper==1.1.1
 # PyAV 19 removed metadata_errors=; faster-whisper still passes it
 av>=11,<19

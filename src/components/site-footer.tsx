@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { DISCORD_INVITE_URL } from "@/lib/pricing";
 
 export function SiteFooter() {
   const year = new Date().getFullYear();
@@ -8,8 +9,8 @@ export function SiteFooter() {
         <div>
           <p className="font-[family-name:var(--font-display)] text-lg font-bold">Shortlio</p>
           <p className="mt-2 max-w-sm text-sm leading-relaxed text-[var(--text-muted)]">
-            Turn long videos into viral-ready shorts with AI clip detection, face-aware reframing,
-            and animated captions.
+            The fastest clipping software — AI moments, face-aware reframing, and animated captions
+            for Shorts, TikTok, and Reels.
           </p>
         </div>
         <div>
@@ -36,6 +37,16 @@ export function SiteFooter() {
               <Link href="/download" className="hover:text-[var(--text)]">
                 Download for Windows
               </Link>
+            </li>
+            <li>
+              <a
+                href={DISCORD_INVITE_URL}
+                className="hover:text-[var(--text)]"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Discord (buy Pro)
+              </a>
             </li>
           </ul>
         </div>

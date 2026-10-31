@@ -114,6 +114,9 @@ export function ClipEditor({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const playerShellRef = useRef<HTMLDivElement | null>(null);
   const prevRenderStatus = useRef(initialClip.render_status);
+  const storagePathRef = useRef(initialClip.storage_path);
+  // Bump only when the burned MP4 actually changes (not on every poll signed-URL refresh).
+  const [videoRevision, setVideoRevision] = useState(0);
   // What is actually painted in the current MP4 (survives Save without re-render).
   const [burnedSnapshot, setBurnedSnapshot] = useState(() => ({
     preset: initialClip.caption_preset,
@@ -125,8 +128,8 @@ export function ClipEditor({
     () => resolveCaptionStyle(captionPreset, captionSettings),
     [captionPreset, captionSettings],
   );
-  const burnedStyle = useMemo(
-    () => resolveCaptionStyle(burnedSnapshot.preset, burnedSnapshot.settings),
+  const burnedStyleKey = useMemo(
+    () => captionStyleKey(resolveCaptionStyle(burnedSnapshot.preset, burnedSnapshot.settings)),
     [burnedSnapshot],
   );
 
@@ -156,7 +159,7 @@ export function ClipEditor({
     clip.render_status === "ready" &&
     Boolean(signedUrl) &&
     captionLanguage === burnedSnapshot.language &&
-    captionStyleKey(style) === captionStyleKey(burnedStyle);
+    captionStyleKey(style) === burnedStyleKey;
 
   const languagePreview = useMemo(() => {
     const sourceLang = transcript[0]?.language || "en";
@@ -217,13 +220,11 @@ export function ClipEditor({
 
   const overlayText = overlayCaption?.text ?? null;
 
-  // Live overlay whenever the on-disk burn does not match the editor style.
+  // Live CSS captions only — no black cover bars over the video.
+  // (Burned MP4 text may still peek through until Save & re-render finishes.)
   const showLiveOverlay =
     !exportMatchesPreview &&
-    (Boolean(overlayText?.trim()) || !transcript.length);
-  // Soft-cover the burned caption band so live preview is not doubled.
-  const hideBurnedCaptions =
-    showLiveOverlay && Boolean(signedUrl) && Boolean(clip.burn_captions);
+    (Boolean(overlayText?.trim()) || !transcript.length || styleDirty);
 
   useEffect(() => {
     if (clip.render_status !== "rendering" && clip.render_status !== "pending") return;
@@ -231,32 +232,39 @@ export function ClipEditor({
       const res = await fetch(`/api/clips/${clip.id}`, { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json();
-      setClip(data.clip);
-      setSignedUrl(data.signedUrl);
+      const next = data.clip as Clip | undefined;
+      if (!next) return;
+
+      const prevStatus = prevRenderStatus.current;
+      const pathChanged =
+        Boolean(next.storage_path) && next.storage_path !== storagePathRef.current;
+      const becameReady =
+        (prevStatus === "rendering" || prevStatus === "pending") &&
+        next.render_status === "ready";
+
+      setClip(next);
+      prevRenderStatus.current = next.render_status;
       if (Array.isArray(data.transcript)) setTranscript(data.transcript);
+
+      // Fresh signed URLs every poll would remount <video key={signedUrl}> and look
+      // like the preview is endlessly refreshing. Only swap when the file changes.
+      if (data.signedUrl && (pathChanged || becameReady)) {
+        storagePathRef.current = next.storage_path;
+        setSignedUrl(data.signedUrl);
+        setVideoRevision((n) => n + 1);
+      }
+
+      if (becameReady) {
+        setBurnedSnapshot({
+          preset: next.caption_preset,
+          settings: (next.caption_settings as CaptionSettings) ?? {},
+          language: next.caption_language,
+        });
+        setMessage("Re-render ready — preview matches the new burned captions.");
+      }
     }, 3000);
     return () => clearInterval(id);
   }, [clip.id, clip.render_status]);
-
-  // After a re-render finishes, the new MP4 matches the clip's saved caption style.
-  useEffect(() => {
-    const prev = prevRenderStatus.current;
-    prevRenderStatus.current = clip.render_status;
-    const finished =
-      (prev === "rendering" || prev === "pending") && clip.render_status === "ready";
-    if (!finished || !signedUrl) return;
-    setBurnedSnapshot({
-      preset: clip.caption_preset,
-      settings: (clip.caption_settings as CaptionSettings) ?? {},
-      language: clip.caption_language,
-    });
-  }, [
-    clip.render_status,
-    signedUrl,
-    clip.caption_preset,
-    clip.caption_settings,
-    clip.caption_language,
-  ]);
 
   useEffect(() => {
     if (transcript.length) return;
@@ -321,6 +329,10 @@ export function ClipEditor({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Save failed");
       setClip(data.clip);
+      // So the poll can detect pending/rendering → ready (not ready → ready).
+      if (reRender && data.clip?.render_status) {
+        prevRenderStatus.current = data.clip.render_status;
+      }
       if (data.clip?.caption_preset) setCaptionPreset(data.clip.caption_preset);
       if (data.clip?.caption_settings && typeof data.clip.caption_settings === "object") {
         setCaptionSettings(data.clip.caption_settings as CaptionSettings);
@@ -329,8 +341,8 @@ export function ClipEditor({
       setMessage(
         reRender
           ? mode === "preset"
-            ? `Preset applied & re-render queued (${nextPreset}).`
-            : "Fine-tune saved & re-render queued — export will match this style."
+            ? `Preset applied & re-render queued (${nextPreset}). Keep this tab open — preview updates when ready.`
+            : "Fine-tune saved & re-render queued — preview updates when the new MP4 is ready."
           : "Settings saved. Re-render to update the burned MP4 captions.",
       );
     } catch (err) {
@@ -377,7 +389,7 @@ export function ClipEditor({
           {signedUrl ? (
             <video
               ref={videoRef}
-              key={signedUrl}
+              key={`${clip.storage_path ?? clip.id}:${videoRevision}`}
               src={signedUrl}
               controls
               // Keep live overlay in sync — native video fullscreen would drop the HTML layer.
@@ -399,27 +411,6 @@ export function ClipEditor({
               Preview unavailable until render completes
             </div>
           )}
-          {hideBurnedCaptions && (
-            <div
-              className={
-                burnedStyle.position === "top"
-                  ? "pointer-events-none absolute inset-x-[6%] top-[8%] h-[14%]"
-                  : burnedStyle.position === "center"
-                    ? "pointer-events-none absolute inset-x-[6%] top-1/2 h-[14%] -translate-y-1/2"
-                    : "pointer-events-none absolute inset-x-[6%] bottom-[12%] h-[14%]"
-              }
-              style={{
-                // Soft frost only — no dark fill (that read as a black bar).
-                backdropFilter: "blur(10px)",
-                WebkitBackdropFilter: "blur(10px)",
-                maskImage:
-                  "linear-gradient(to bottom, transparent, black 22%, black 78%, transparent)",
-                WebkitMaskImage:
-                  "linear-gradient(to bottom, transparent, black 22%, black 78%, transparent)",
-              }}
-              aria-hidden
-            />
-          )}
           {showLiveOverlay && (
             <CaptionOverlayPreview
               style={style}
@@ -432,12 +423,13 @@ export function ClipEditor({
               }
               playing={playing}
               sampleFallback={!transcript.length && (styleDirty || !exportMatchesPreview)}
+              className="z-[2]"
             />
           )}
           {signedUrl && (
             <button
               type="button"
-              className="absolute right-2 top-2 z-[2] rounded-md border border-white/20 bg-black/55 px-2 py-1 text-[11px] font-medium text-white/90 hover:bg-black/75"
+              className="absolute right-3 top-2 z-[3] rounded-md border border-white/20 bg-black/55 px-2 py-1 text-[11px] font-medium text-white/90 hover:bg-black/75"
               onClick={() => {
                 const el = playerShellRef.current;
                 if (!el) return;
@@ -658,13 +650,31 @@ export function ClipEditor({
           {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
           {message && <p className="text-sm text-[var(--success)]">{message}</p>}
           <div className="flex flex-wrap gap-2">
-            <Button variant="secondary" onClick={() => save(false)} disabled={saving}>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => void save(false)}
+              disabled={saving || clip.render_status === "rendering" || clip.render_status === "pending"}
+            >
               {saving ? "Saving…" : "Save settings"}
             </Button>
-            <Button onClick={() => save(true)} disabled={saving}>
-              {saving ? "Saving…" : "Save & re-render"}
+            <Button
+              type="button"
+              onClick={() => void save(true)}
+              disabled={saving || clip.render_status === "rendering" || clip.render_status === "pending"}
+            >
+              {saving
+                ? "Saving…"
+                : clip.render_status === "rendering" || clip.render_status === "pending"
+                  ? "Re-rendering…"
+                  : "Save & re-render"}
             </Button>
-            <Button variant="secondary" onClick={download} disabled={clip.render_status !== "ready"}>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => void download()}
+              disabled={clip.render_status !== "ready"}
+            >
               Download
             </Button>
           </div>

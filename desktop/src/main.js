@@ -3,6 +3,8 @@ const path = require("path");
 const fs = require("fs");
 
 const DEFAULT_URL = "http://localhost:3000";
+/** Ignore same-URL full reloads that arrive faster than this (Next/Turbopack HMR thrash). */
+const RELOAD_GUARD_MS = 4000;
 
 function readBundledAppUrl() {
   try {
@@ -38,8 +40,19 @@ function isAllowedNavigation(targetUrl, appOrigin) {
   }
 }
 
+function sameDocumentUrl(a, b) {
+  try {
+    const ua = new URL(a);
+    const ub = new URL(b);
+    return ua.origin === ub.origin && ua.pathname === ub.pathname && ua.search === ub.search;
+  } catch {
+    return a === b;
+  }
+}
+
 function createWindow() {
   const appUrl = resolveAppUrl();
+  let lastMainNav = { url: "", at: 0 };
 
   const win = new BrowserWindow({
     width: 1280,
@@ -55,24 +68,64 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       spellcheck: false,
+      backgroundThrottling: false,
     },
   });
 
   win.once("ready-to-show", () => win.show());
 
+  // Never spawn child BrowserWindows — that looked like constant flicker with Next popups/HMR.
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedNavigation(url, appUrl)) {
-      return { action: "allow" };
+      if (!sameDocumentUrl(win.webContents.getURL(), url)) {
+        void win.loadURL(url);
+      }
+      return { action: "deny" };
     }
-    shell.openExternal(url);
+    void shell.openExternal(url);
     return { action: "deny" };
   });
 
   win.webContents.on("will-navigate", (event, url) => {
     if (!isAllowedNavigation(url, appUrl)) {
       event.preventDefault();
-      shell.openExternal(url);
+      void shell.openExternal(url);
+      return;
     }
+
+    // Turbopack/Next full-reload loops fire will-navigate to the same URL repeatedly.
+    const now = Date.now();
+    const current = win.webContents.getURL();
+    if (
+      sameDocumentUrl(current, url) &&
+      sameDocumentUrl(lastMainNav.url, url) &&
+      now - lastMainNav.at < RELOAD_GUARD_MS
+    ) {
+      event.preventDefault();
+      return;
+    }
+    lastMainNav = { url, at: now };
+  });
+
+  // Soft-guard location.reload from injected page scripts (HMR fallback).
+  win.webContents.on("dom-ready", () => {
+    void win.webContents
+      .executeJavaScript(
+        `(() => {
+          if (window.__shortlioReloadGuard) return;
+          window.__shortlioReloadGuard = true;
+          const native = window.location.reload.bind(window.location);
+          let last = 0;
+          window.location.reload = function () {
+            const now = Date.now();
+            if (now - last < ${RELOAD_GUARD_MS}) return;
+            last = now;
+            return native();
+          };
+        })();`,
+        true,
+      )
+      .catch(() => {});
   });
 
   win.loadURL(appUrl).catch((err) => {
@@ -82,19 +135,26 @@ function createWindow() {
   return win;
 }
 
-app.whenReady().then(() => {
-  // Prefer Chromium network stack defaults; no custom cert bypass.
-  session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => {
-    callback(false);
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.focus();
   });
 
-  createWindow();
+  app.whenReady().then(() => {
+    createWindow();
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
   });
-});
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
-});
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin") app.quit();
+  });
+}

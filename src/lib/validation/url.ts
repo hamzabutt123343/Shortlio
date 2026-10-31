@@ -18,6 +18,8 @@ const PRIVATE_HOST_PATTERNS = [
 export const SUPPORTED_PLATFORMS = [
   "youtube",
   "youtu.be",
+  "twitch",
+  "kick",
   "tiktok",
   "instagram",
   "vimeo",
@@ -27,20 +29,53 @@ export const SUPPORTED_PLATFORMS = [
 
 export type SupportedPlatform =
   | "youtube"
+  | "twitch"
+  | "kick"
   | "tiktok"
   | "instagram"
   | "vimeo"
   | "twitter"
   | "unknown";
 
+export type SourceKindHint = "vod" | "clip" | "live" | "unknown";
+
 export function detectPlatform(url: string): SupportedPlatform {
   try {
     const host = new URL(url).hostname.replace(/^www\./, "").toLowerCase();
     if (host.includes("youtube") || host === "youtu.be") return "youtube";
+    if (host === "clips.twitch.tv" || host.endsWith("twitch.tv")) return "twitch";
+    if (host === "kick.com" || host.endsWith(".kick.com")) return "kick";
     if (host.includes("tiktok")) return "tiktok";
     if (host.includes("instagram")) return "instagram";
     if (host.includes("vimeo")) return "vimeo";
     if (host.includes("twitter") || host === "x.com") return "twitter";
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+/** Best-effort URL shape hint (worker confirms live vs VOD via metadata). */
+export function detectSourceKind(url: string): SourceKindHint {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+    const path = parsed.pathname.toLowerCase();
+    const platform = detectPlatform(url);
+
+    if (platform === "twitch") {
+      if (host === "clips.twitch.tv" || path.includes("/clip/")) return "clip";
+      if (/\/videos\/\d+/.test(path)) return "vod";
+      if (/^\/[a-z0-9_]+\/?$/i.test(path)) return "live";
+      return "unknown";
+    }
+    if (platform === "kick") {
+      if (path.includes("/clip/") || path.includes("/clips/")) return "clip";
+      if (path.includes("/video/") || path.includes("/videos/")) return "vod";
+      if (/^\/[a-z0-9_-]+\/?$/i.test(path)) return "live";
+      return "unknown";
+    }
+    if (platform === "youtube") return "vod";
     return "unknown";
   } catch {
     return "unknown";
@@ -73,13 +108,14 @@ export const videoUrlSchema = z
   }, "Private or local network URLs are not allowed")
   .refine((value) => detectPlatform(value) !== "unknown", {
     message:
-      "Unsupported source. Use a public YouTube, TikTok, Instagram, Vimeo, or X video URL.",
+      "Unsupported source. Use a public YouTube, Twitch, Kick, TikTok, Instagram, Vimeo, or X URL.",
   });
 
 export function validateVideoUrl(url: string): {
   ok: true;
   url: string;
   platform: SupportedPlatform;
+  kind: SourceKindHint;
 } | {
   ok: false;
   error: string;
@@ -92,5 +128,6 @@ export function validateVideoUrl(url: string): {
     ok: true,
     url: parsed.data,
     platform: detectPlatform(parsed.data),
+    kind: detectSourceKind(parsed.data),
   };
 }

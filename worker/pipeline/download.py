@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 from config import Settings, get_settings, run_subprocess, validate_public_http_url, ytdlp_base_args
+from pipeline.source_platform import SourceAccessError, detect_platform_from_url, map_ytdlp_error
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +55,17 @@ def download_section_ytdlp(
         out_tpl,
         url,
     ]
+    platform = detect_platform_from_url(url)
     try:
         run_subprocess(cmd, timeout=1800)
     except Exception as exc:
         logger.warning("Section download failed (%s), falling back to full then trim", exc)
-        return _fallback_download_and_trim(url, start, end, dest, settings)
+        try:
+            return _fallback_download_and_trim(url, start, end, dest, settings)
+        except Exception as fallback_exc:
+            raise SourceAccessError(
+                map_ytdlp_error(fallback_exc, platform=platform)
+            ) from fallback_exc
 
     if dest.exists():
         return dest
@@ -66,7 +73,10 @@ def download_section_ytdlp(
         if candidate.suffix.lower() in {".mp4", ".mkv", ".webm"}:
             candidate.rename(dest)
             return dest
-    return _fallback_download_and_trim(url, start, end, dest, settings)
+    try:
+        return _fallback_download_and_trim(url, start, end, dest, settings)
+    except Exception as fallback_exc:
+        raise SourceAccessError(map_ytdlp_error(fallback_exc, platform=platform)) from fallback_exc
 
 
 def _fallback_download_and_trim(
@@ -129,6 +139,58 @@ def _fallback_download_and_trim(
     return dest
 
 
+def trim_local_media(
+    media_path: Path,
+    start: float,
+    end: float,
+    dest: Path,
+    *,
+    settings: Settings | None = None,
+) -> Path:
+    """Cut a window from a local media file (used for live snapshots)."""
+    settings = settings or get_settings()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() and dest.stat().st_size > 0:
+        return dest
+    ffmpeg = settings.resolved_ffmpeg()
+    duration = max(0.1, end - start)
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-ss",
+        f"{max(0.0, start):.3f}",
+        "-i",
+        str(media_path),
+        "-t",
+        f"{duration:.3f}",
+        "-c",
+        "copy",
+        str(dest),
+    ]
+    try:
+        run_subprocess(cmd, timeout=600)
+    except Exception:
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-ss",
+            f"{max(0.0, start):.3f}",
+            "-i",
+            str(media_path),
+            "-t",
+            f"{duration:.3f}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-c:a",
+            "aac",
+            str(dest),
+        ]
+        run_subprocess(cmd, timeout=1200)
+    return dest
+
+
 def download_moment_segment(
     *,
     job_id: str,
@@ -138,11 +200,26 @@ def download_moment_segment(
     index: int,
     padding: float | None = None,
     settings: Settings | None = None,
+    local_media_path: Path | None = None,
 ) -> Path:
     settings = settings or get_settings()
     pad = padding if padding is not None else settings.segment_padding_seconds
     start_p = max(0.0, start - pad)
     end_p = end + pad
+
+    if local_media_path is not None:
+        work_dir = settings.resolved_temp_dir() / job_id / "segments"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        dest = segment_cache_path(work_dir, index)
+        # Live snapshot timeline is already the clip window — little/no pad.
+        return trim_local_media(
+            local_media_path,
+            max(0.0, start),
+            end,
+            dest,
+            settings=settings,
+        )
+
     # Reuse across jobs so caption-only re-renders skip redownload
     global_dest = _global_segment_path(settings, source_url, start_p, end_p)
     if global_dest.exists() and global_dest.stat().st_size > 0:

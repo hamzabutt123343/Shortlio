@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import path from "path";
 
 const nextConfig: NextConfig = {
   // Allow ngrok / tunnel hosts to load /__nextjs_font and other dev assets.
@@ -13,7 +14,10 @@ const nextConfig: NextConfig = {
     "**.ngrok.io",
     "**.ngrok.app",
   ],
-  // Auth/dashboard SaaS reads cookies on most routes; keep classic dynamic rendering.
+  // Turbopack FS cache + CSS watching desktop/ was full-reloading the browser every ~1s.
+  experimental: {
+    turbopackFileSystemCacheForDev: false,
+  },
   turbopack: {
     rules: {
       "*.css": {
@@ -21,6 +25,29 @@ const nextConfig: NextConfig = {
         as: "*.css",
       },
     },
+  },
+  webpack: (config, { dev }) => {
+    if (dev) {
+      config.watchOptions = {
+        ...config.watchOptions,
+        ignored: [
+          "**/.git/**",
+          "**/node_modules/**",
+          "**/.next/**",
+          "**/desktop/**",
+          "**/worker/.venv/**",
+          "**/worker/tmp/**",
+          "**/worker/tmp_*/**",
+        ],
+      };
+    }
+    // Keep resolve rooted at the app (avoid picking up desktop/node_modules).
+    config.resolve = config.resolve ?? {};
+    config.resolve.modules = [
+      path.resolve(process.cwd(), "node_modules"),
+      "node_modules",
+    ];
+    return config;
   },
 };
 

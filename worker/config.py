@@ -7,6 +7,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -48,15 +49,26 @@ class Settings(BaseSettings):
     whisper_beam_size: int = Field(default=1, alias="WHISPER_BEAM_SIZE")
     whisper_batch_size: int = Field(default=8, alias="WHISPER_BATCH_SIZE")
     ytdlp_js_runtime: str = Field(default="node", alias="YTDLP_JS_RUNTIME")
+    # Optional Netscape cookies file for Twitch/Kick VODs that gate public access.
+    # Never required for public YouTube; leave empty in normal setups.
+    ytdlp_cookies_file: str = Field(default="", alias="YTDLP_COOKIES_FILE")
 
     llm_provider: LLMProvider = Field(default="heuristic", alias="LLM_PROVIDER")
     groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
 
     segment_padding_seconds: float = Field(default=1.5, alias="SEGMENT_PADDING_SECONDS")
+    # AI mode hard cap (scout ASR samples long Kick/Twitch VODs; not full Whisper).
     max_source_duration_seconds: float = Field(
-        default=7200.0, alias="MAX_SOURCE_DURATION_SECONDS"
+        default=28800.0, alias="MAX_SOURCE_DURATION_SECONDS"
     )
+    # Non-YouTube AI: Whisper at most this much audio (scout samples across long VODs).
+    # YouTube uses free captions; Kick/Twitch have none — full-VOD Whisper is too slow.
+    asr_full_max_seconds: float = Field(default=1800.0, alias="ASR_FULL_MAX_SECONDS")
+    asr_scout_budget_seconds: float = Field(default=1200.0, alias="ASR_SCOUT_BUDGET_SECONDS")
+    asr_scout_chunk_seconds: float = Field(default=90.0, alias="ASR_SCOUT_CHUNK_SECONDS")
+    # Supabase Free Storage global limit is 50MB — stay under it (Pro can raise via dashboard).
+    max_upload_bytes: int = Field(default=48 * 1024 * 1024, alias="MAX_UPLOAD_BYTES")
 
     ffmpeg_path: str = Field(default="", alias="FFMPEG_PATH")
     ffprobe_path: str = Field(default="", alias="FFPROBE_PATH")
@@ -183,14 +195,24 @@ def is_youtube_url(url: str) -> bool:
     return bool(_YOUTUBE_RE.match(url.strip()))
 
 
+def ytdlp_cmd() -> list[str]:
+    """Always run the venv's yt-dlp module (not a stale PATH binary without curl_cffi)."""
+    return [sys.executable, "-m", "yt_dlp"]
+
+
 def ytdlp_base_args(settings: Settings | None = None) -> list[str]:
     """Common yt-dlp flags (JS runtime for modern YouTube extraction)."""
     settings = settings or get_settings()
-    args = ["yt-dlp", "--no-playlist"]
+    # Use `python -m yt_dlp` so Kick/Twitch get the venv package + curl_cffi impersonation.
+    # A bare `yt-dlp` on PATH is often an older global install (404 / no impersonate).
+    args = [*ytdlp_cmd(), "--no-playlist"]
     runtime = (settings.ytdlp_js_runtime or "").strip()
     if runtime:
         path = shutil.which(runtime)
         args.extend(["--js-runtimes", f"{runtime}:{path}" if path else runtime])
+    cookies = (settings.ytdlp_cookies_file or "").strip()
+    if cookies and Path(cookies).is_file():
+        args.extend(["--cookies", cookies])
     return args
 
 

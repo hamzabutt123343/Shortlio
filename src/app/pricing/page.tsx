@@ -4,15 +4,17 @@ import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { Button } from "@/components/ui";
 import { getSessionUser } from "@/lib/auth/session";
+import { DISCORD_INVITE_URL, PLAN_COPY } from "@/lib/pricing";
 
 export const metadata: Metadata = {
   title: "Pricing — Shortlio",
   description:
-    "Free plan with 3 clips per day. Pro at $10/mo for unlimited clip generation under fair-use capacity.",
+    "Basic is free. Pro is Rs 500 lifetime via Discord. The fastest clipping software for Shorts, TikTok, and Reels.",
 };
 
 export default async function PricingPage() {
   const user = await getSessionUser();
+  const { free, pro } = PLAN_COPY;
 
   return (
     <div className="flex min-h-full flex-col">
@@ -22,41 +24,64 @@ export default async function PricingPage() {
           Pricing
         </h1>
         <p className="mt-3 max-w-xl text-[var(--text-muted)]">
-          Start free with a daily clip allowance. Upgrade to Pro when you need unlimited generation
-          under fair-use capacity.
+          Basic is free. Pro is a one-time Rs 500 lifetime unlock — purchases are handled on Discord.
+          Built to be the fastest clipping software from URL to export.
         </p>
         <div className="mt-12 grid gap-6 md:grid-cols-2">
           <div className="rounded-[14px] border border-[var(--border)] bg-[var(--surface)]/70 p-7">
-            <p className="text-sm text-[var(--text-muted)]">Free</p>
-            <p className="mt-2 font-[family-name:var(--font-display)] text-4xl font-bold">$0</p>
+            <p className="text-sm text-[var(--text-muted)]">{free.name}</p>
+            <p className="mt-2 font-[family-name:var(--font-display)] text-4xl font-bold">
+              {free.priceLabel}
+            </p>
+            <p className="mt-2 text-sm text-[var(--text-muted)]">{free.blurb}</p>
             <ul className="mt-6 space-y-2.5 text-sm text-[var(--text-muted)]">
-              <li>3 successful clips per UTC day</li>
-              <li>Public URL imports</li>
-              <li>Caption presets & smart reframing</li>
-              <li>Server-enforced daily quota</li>
+              {free.features.map((f) => (
+                <li key={f}>{f}</li>
+              ))}
             </ul>
             <Link href={user ? "/dashboard" : "/signup"} className="mt-8 block">
               <Button variant="secondary" className="w-full">
-                Use Free
+                Start free
               </Button>
             </Link>
           </div>
           <div className="rounded-[14px] border border-[var(--accent)]/40 bg-[var(--accent-dim)] p-7">
-            <p className="text-sm text-[var(--accent)]">Pro</p>
+            <p className="text-sm text-[var(--accent)]">{pro.name}</p>
             <p className="mt-2 font-[family-name:var(--font-display)] text-4xl font-bold">
-              $10<span className="text-lg font-medium text-[var(--text-muted)]">/mo</span>
+              {pro.priceLabel}
+              <span className="text-lg font-medium text-[var(--text-muted)]">
+                {" "}
+                / {pro.priceDetail}
+              </span>
             </p>
+            <p className="mt-2 text-sm text-[var(--text-muted)]">{pro.blurb}</p>
             <ul className="mt-6 space-y-2.5 text-sm text-[var(--text-muted)]">
-              <li>Unlimited clips (fair use / capacity)</li>
-              <li>No daily clip counter</li>
-              <li>Priority worker capacity when available</li>
-              <li>Full export & caption controls</li>
+              {pro.features.map((f) => (
+                <li key={f}>{f}</li>
+              ))}
             </ul>
-            <Link href={user ? "/billing" : "/signup"} className="mt-8 block">
-              <Button className="w-full">Go Pro</Button>
-            </Link>
+            <a
+              href={DISCORD_INVITE_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-8 block"
+            >
+              <Button className="w-full">Buy Pro on Discord</Button>
+            </a>
           </div>
         </div>
+        <p className="mt-8 max-w-2xl text-sm text-[var(--text-muted)]">
+          After payment on Discord, Pro is activated on your Shortlio account. Questions? Join{" "}
+          <a
+            href={DISCORD_INVITE_URL}
+            className="text-[var(--accent)] underline-offset-2 hover:underline"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            discord.gg/yaWrgpnya5
+          </a>
+          .
+        </p>
       </main>
       <SiteFooter />
     </div>

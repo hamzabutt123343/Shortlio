@@ -15,11 +15,11 @@ export default async function TemplatesPage() {
   const usageLabel =
     usage.plan === "pro"
       ? "Pro · unlimited (fair use)"
-      : `Free · ${usage.remaining}/${usage.limit} clips left today`;
+      : `Basic · ${usage.remaining}/${usage.limit} clips left today`;
 
   return (
     <AppShell
-      planLabel={usage.plan === "pro" ? "Pro" : "Free"}
+      planLabel={usage.plan === "pro" ? "Pro" : "Basic"}
       usageLabel={usageLabel}
       title="Templates"
     >

@@ -13,15 +13,16 @@ import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { Button } from "@/components/ui";
 import { getSessionUser } from "@/lib/auth/session";
+import { DISCORD_INVITE_URL, PLAN_COPY } from "@/lib/pricing";
 
 export const metadata: Metadata = {
-  title: "Shortlio — Turn long videos into viral-ready shorts",
+  title: "Shortlio — Fastest AI clipping for viral shorts",
   description:
-    "AI clip detection, face-aware reframing, reaction layouts, animated captions, and Hinglish support. Export for YouTube Shorts, TikTok, and Instagram Reels.",
+    "The fastest clipping software: AI clip detection, face-aware reframing, animated captions. Basic free · Pro Rs 500 lifetime via Discord.",
   openGraph: {
-    title: "Shortlio — AI long-form to short-form clips",
+    title: "Shortlio — Fastest long-form to short-form clips",
     description:
-      "Paste a public URL. Shortlio finds the moments, reframes the speaker, burns captions, and exports vertical clips.",
+      "Paste a public URL. Shortlio finds the moments, reframes the speaker, burns captions, and exports vertical clips — fast.",
     type: "website",
   },
 };
@@ -80,15 +81,15 @@ const STEPS = [
 const FAQS = [
   {
     q: "What can I import?",
-    a: "Public video URLs supported by the Shortlio worker (YouTube and other yt-dlp sources). Only process content you have rights to use.",
+    a: "Public YouTube, Twitch, and Kick VODs/clips (and Live snapshot for active streams), plus other yt-dlp sources on the allowlist. Only process content you have rights to use.",
   },
   {
-    q: "How does the Free plan work?",
-    a: "Free includes 3 successful clips per UTC day with caption presets and smart reframing. Quotas are enforced on the server.",
+    q: "How does Basic (free) work?",
+    a: "Basic is free: 3 successful clips per UTC day with caption presets and smart reframing. Quotas are enforced on the server.",
   },
   {
-    q: "What do I get with Pro?",
-    a: "Pro is $10/month with unlimited clip generation under fair-use capacity, no daily clip counter, and full export controls.",
+    q: "How do I get Pro?",
+    a: "Pro is Rs 500 lifetime. Join Discord to purchase — we activate unlimited clips (fair use) on your account after payment.",
   },
   {
     q: "Do captions support Hinglish?",
@@ -113,11 +114,11 @@ export default async function HomePage() {
               Shortlio
             </p>
             <h1 className="mt-5 max-w-xl text-2xl font-semibold leading-snug tracking-tight text-[var(--text)] md:text-4xl">
-              Turn long videos into viral-ready short clips with AI.
+              The fastest clipping software for viral-ready shorts.
             </h1>
             <p className="mt-4 max-w-lg text-base leading-relaxed text-[var(--text-muted)] md:text-lg">
               Paste a URL. Shortlio finds the moments, reframes the speaker, burns animated captions,
-              and exports for Shorts, TikTok, and Reels.
+              and exports for Shorts, TikTok, and Reels — built for speed.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
               <Link href={ctaHref}>
@@ -197,45 +198,63 @@ export default async function HomePage() {
             Simple pricing
           </h2>
           <p className="mt-3 max-w-xl text-[var(--text-muted)]">
-            Start free with a daily allowance. Upgrade when you need unlimited generation under
-            fair-use capacity.
+            Basic is free. Pro is Rs 500 lifetime — buy on Discord. Same stack either way: built to
+            be the fastest clipping software.
           </p>
           <div className="mt-12 grid gap-6 md:grid-cols-2">
             <div className="rounded-[14px] border border-[var(--border)] bg-[var(--surface)]/60 p-7">
-              <p className="text-sm text-[var(--text-muted)]">Free</p>
-              <p className="mt-2 font-[family-name:var(--font-display)] text-4xl font-bold">$0</p>
+              <p className="text-sm text-[var(--text-muted)]">{PLAN_COPY.free.name}</p>
+              <p className="mt-2 font-[family-name:var(--font-display)] text-4xl font-bold">
+                {PLAN_COPY.free.priceLabel}
+              </p>
               <ul className="mt-6 space-y-2.5 text-sm text-[var(--text-muted)]">
-                <li>3 successful clips per UTC day</li>
-                <li>Public URL imports</li>
-                <li>Caption presets & smart reframing</li>
-                <li>Server-enforced daily quota</li>
+                {PLAN_COPY.free.features.map((f) => (
+                  <li key={f}>{f}</li>
+                ))}
               </ul>
               <Link href={user ? "/dashboard" : "/signup"} className="mt-8 block">
                 <Button variant="secondary" className="w-full">
-                  Use Free
+                  Start free
                 </Button>
               </Link>
             </div>
             <div className="rounded-[14px] border border-[var(--accent)]/35 bg-[var(--accent-dim)] p-7">
-              <p className="text-sm text-[var(--accent)]">Pro</p>
+              <p className="text-sm text-[var(--accent)]">{PLAN_COPY.pro.name}</p>
               <p className="mt-2 font-[family-name:var(--font-display)] text-4xl font-bold">
-                $10<span className="text-lg font-medium text-[var(--text-muted)]">/mo</span>
+                {PLAN_COPY.pro.priceLabel}
+                <span className="text-lg font-medium text-[var(--text-muted)]">
+                  {" "}
+                  / {PLAN_COPY.pro.priceDetail}
+                </span>
               </p>
               <ul className="mt-6 space-y-2.5 text-sm text-[var(--text-muted)]">
-                <li>Unlimited clips (fair use / capacity)</li>
-                <li>No daily clip counter</li>
-                <li>Priority worker capacity when available</li>
-                <li>Full export & caption controls</li>
+                {PLAN_COPY.pro.features.map((f) => (
+                  <li key={f}>{f}</li>
+                ))}
               </ul>
-              <Link href={user ? "/billing" : "/signup"} className="mt-8 block">
-                <Button className="w-full">Go Pro</Button>
-              </Link>
+              <a
+                href={DISCORD_INVITE_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-8 block"
+              >
+                <Button className="w-full">Buy Pro on Discord</Button>
+              </a>
             </div>
           </div>
           <p className="mt-4 text-center text-sm text-[var(--text-muted)]">
             <Link href="/pricing" className="text-[var(--accent)] hover:underline">
               Full pricing details
             </Link>
+            {" · "}
+            <a
+              href={DISCORD_INVITE_URL}
+              className="text-[var(--accent)] hover:underline"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Discord
+            </a>
           </p>
         </div>
       </section>
