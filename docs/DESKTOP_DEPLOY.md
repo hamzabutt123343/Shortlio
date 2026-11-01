@@ -42,6 +42,8 @@ npm ci
 powershell -ExecutionPolicy Bypass -File .\scripts\bundle-engine.ps1
 ```
 
+`bundle-engine.ps1` copies a **relocatable** CPython into `resources/engine/python/` (full `sys.base_prefix` tree + pip deps). Do **not** ship a Windows `venv` — its `pyvenv.cfg` `home=` points at the build machine (e.g. GitHub `hostedtoolcache`) and fails on user PCs with exit 103.
+
 Then place binaries (not committed to git):
 
 - `desktop/resources/ffmpeg/ffmpeg.exe`

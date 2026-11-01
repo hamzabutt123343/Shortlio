@@ -13,7 +13,8 @@ extraResources:
     to: engine
     filter:
       - "**/*"
-      - "!**/.venv/Lib/site-packages/**/__pycache__/**"
+      # Never ship a Windows venv redirector (breaks off the build machine).
+      - "!**/.venv/**"
       - "!**/__pycache__/**"
       - "!**/*.pyc"
   - from: resources/ffmpeg

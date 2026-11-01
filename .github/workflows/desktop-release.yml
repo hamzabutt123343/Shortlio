@@ -65,6 +65,15 @@ jobs:
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File ./scripts/bundle-engine.ps1
 
+      - name: Verify relocatable Python (no venv redirector)
+        shell: pwsh
+        run: |
+          $py = "resources/engine/python/python.exe"
+          if (-not (Test-Path $py)) { throw "Missing bundled $py — bundle-engine.ps1 must copy base_prefix into engine/python" }
+          if (Test-Path "resources/engine/.venv") { throw "Refusing to package engine/.venv (Windows venv home= breaks off CI)" }
+          & $py -c "import sys; from pathlib import Path; p=Path(sys.executable).resolve().parent; assert any(p.glob('python*.dll')) or (p/'Lib').exists(); import yt_dlp; print('ok', sys.executable)"
+          if ($LASTEXITCODE -ne 0) { throw "Bundled Python probe failed" }
+
       - name: Fetch FFmpeg essentials (Windows)
         shell: pwsh
         run: |

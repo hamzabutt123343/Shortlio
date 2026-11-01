@@ -33,6 +33,32 @@ function tokenPathFor(jobId) {
   return path.join(dir, `${jobId}.token`);
 }
 
+/**
+ * Windows venv Scripts\python.exe is a redirector that reads pyvenv.cfg `home=`.
+ * CI-built venvs point at C:\hostedtoolcache\... and fail on user PCs (exit 103).
+ */
+function isUsablePython(exe) {
+  if (!exe || !fs.existsSync(exe)) return false;
+  const cfgPath = path.join(path.dirname(exe), "..", "pyvenv.cfg");
+  if (!fs.existsSync(cfgPath)) return true;
+  try {
+    const text = fs.readFileSync(cfgPath, "utf8");
+    const match = text.match(/^\s*home\s*=\s*(.+)\s*$/m);
+    if (!match) return true;
+    const home = match[1].trim().replace(/^["']|["']$/g, "");
+    const homePy = path.join(home, "python.exe");
+    if (!fs.existsSync(homePy)) {
+      console.error(
+        `[engine] Skipping broken venv python (home missing): ${exe} -> ${homePy}`
+      );
+      return false;
+    }
+  } catch {
+    // If cfg is unreadable, still try spawning — spawn errors surface to the UI.
+  }
+  return true;
+}
+
 function findEnginePython() {
   const root = resourcesRoot();
   const candidates = [
@@ -41,11 +67,11 @@ function findEnginePython() {
     path.join(root, "engine", "Scripts", "python.exe"),
   ];
   for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
+    if (isUsablePython(p)) return p;
   }
   // Dev fallback: repo worker venv
   const devVenv = path.join(__dirname, "..", "..", "worker", ".venv", "Scripts", "python.exe");
-  if (fs.existsSync(devVenv)) return devVenv;
+  if (isUsablePython(devVenv)) return devVenv;
   return null;
 }
 
@@ -133,7 +159,7 @@ function runJob({ jobId, accessToken }) {
       resolve({
         ok: false,
         error:
-          "Local engine not found. Run desktop/scripts/bundle-engine.ps1 or use a release build that includes the engine.",
+          "Local engine not found or broken (Python missing). Reinstall the latest Shortlio Desktop release, or run desktop/scripts/bundle-engine.ps1 for a local build.",
       });
       return;
     }
