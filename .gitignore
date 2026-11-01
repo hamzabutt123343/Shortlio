@@ -72,6 +72,9 @@ supabase/.temp/
 # vercel
 .vercel
 
+# local tooling (portable gh, etc.)
+.tools/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
