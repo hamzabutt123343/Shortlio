@@ -133,7 +133,8 @@ export async function resolveLatestWindowsInstaller(): Promise<DesktopInstallerI
   const url = `https://api.github.com/repos/${DESKTOP_GITHUB_OWNER}/${DESKTOP_GITHUB_REPO}/releases?per_page=30`;
   const res = await fetch(url, {
     headers: githubHeaders(),
-    next: { revalidate: 300 },
+    // Keep fresh so a new desktop-v* tag is offered within seconds of publish.
+    cache: "no-store",
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
