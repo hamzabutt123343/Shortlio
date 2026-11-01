@@ -16,6 +16,13 @@ def test_scout_windows_spreads_across_long_vod():
     assert windows[-1][1] <= 21303 + 0.1
 
 
+def test_scout_windows_respects_intro_skip():
+    windows = _scout_windows(21303, budget=1200, chunk=90, skip_start=120.0)
+    assert windows
+    assert all(s >= 120.0 - 0.01 for s, _ in windows)
+    assert windows[0][0] >= 119.0
+
+
 def test_coverage_and_merge():
     existing = [
         TranscriptSegment(0, 10, "hello"),

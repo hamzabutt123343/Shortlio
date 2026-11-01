@@ -498,24 +498,34 @@ def _scout_windows(
     *,
     budget: float,
     chunk: float,
+    skip_start: float = 0.0,
 ) -> list[tuple[float, float]]:
-    """Evenly sample short windows across a long VOD (total audio ≈ budget)."""
+    """Evenly sample short windows across a long VOD (total audio ≈ budget).
+
+    skip_start excludes the opening N seconds (AI intro skip) from sampling.
+    """
     duration = max(0.0, float(duration))
     budget = max(60.0, float(budget))
     chunk = max(30.0, min(float(chunk), budget))
+    skip = max(0.0, min(float(skip_start or 0.0), max(0.0, duration - 30.0)))
     if duration <= 0:
-        return [(0.0, chunk)]
-    if duration <= budget:
-        return [(0.0, duration)]
+        return [(skip, skip + chunk)]
+    # Entire remaining media fits in one ASR pass.
+    if duration - skip <= budget:
+        start = skip
+        end = duration
+        if end - start < 5.0:
+            return [(0.0, min(duration, chunk))] if duration >= 5.0 else []
+        return [(start, end)]
     n = max(2, int(budget // chunk))
-    usable = max(0.0, duration - chunk)
+    usable = max(0.0, duration - skip - chunk)
     windows: list[tuple[float, float]] = []
     for i in range(n):
-        start = (usable * i / (n - 1)) if n > 1 else 0.0
+        start = skip + ((usable * i / (n - 1)) if n > 1 else 0.0)
         end = min(duration, start + chunk)
-        if end - start >= 5.0:
+        if end - start >= 5.0 and start >= skip - 0.01:
             windows.append((start, end))
-    return windows or [(0.0, min(duration, chunk))]
+    return windows or ([(skip, min(duration, skip + chunk))] if duration > skip + 5 else [])
 
 
 def build_scout_transcript(
@@ -525,18 +535,28 @@ def build_scout_transcript(
     *,
     settings: Settings | None = None,
     on_progress: ProgressCb | None = None,
+    intro_skip_seconds: float | None = None,
 ) -> list[TranscriptSegment]:
     """Whisper spaced samples across a long Kick/Twitch VOD — same later stages as YouTube."""
     settings = settings or get_settings()
+    skip = (
+        float(settings.ai_intro_skip_seconds)
+        if intro_skip_seconds is None
+        else float(intro_skip_seconds)
+    )
+    # Keep room for scout chunks after the intro on short-ish VODs.
+    skip = max(0.0, min(skip, max(0.0, float(duration) - 60.0)))
     windows = _scout_windows(
         duration,
         budget=float(settings.asr_scout_budget_seconds),
         chunk=float(settings.asr_scout_chunk_seconds),
+        skip_start=skip,
     )
     logger.info(
-        "Scout ASR: %d windows (budget=%.0fs) over %.0fs VOD",
+        "Scout ASR: %d windows (budget=%.0fs, intro_skip=%.0fs) over %.0fs VOD",
         len(windows),
         settings.asr_scout_budget_seconds,
+        skip,
         duration,
     )
     all_segments: list[TranscriptSegment] = []
@@ -817,8 +837,13 @@ def transcribe_groq_proxy(
                 )
                 return transcribe_local(audio_path, settings)
             if resp.status_code >= 400:
+                body = (resp.text or "").strip()
+                if "text/html" in (resp.headers.get("content-type") or "").lower() or body.startswith("<"):
+                    detail = "got HTML from app host (desktop transcribe API missing)"
+                else:
+                    detail = body[:400]
                 raise RuntimeError(
-                    f"groq_proxy failed ({resp.status_code}): {resp.text[:800]}"
+                    f"groq_proxy failed ({resp.status_code}): {detail}"
                 )
             body = resp.json()
     payload = body.get("transcription") if isinstance(body, dict) else None
@@ -918,13 +943,17 @@ def ensure_transcript(
     local_media_path: Path | None = None,
     time_range: tuple[float, float] | None = None,
     source_duration: float | None = None,
+    # When True (AI mode), scout ASR skips the opening intro. Custom time_range ignores this.
+    apply_ai_intro_skip: bool = False,
 ) -> list[TranscriptSegment]:
     """Build a transcript the same way for every platform: captions if any → else ASR → moments.
 
     YouTube usually returns captions in seconds. Kick/Twitch have no free captions, so we:
-    - Custom clip: Whisper only the selected window
+    - Custom clip: Whisper only the selected window (intro skip never applied)
     - AI on long VODs: scout-sample ≤ ASR_SCOUT_BUDGET_SECONDS across the stream
+      (skips first AI_INTRO_SKIP_SECONDS when apply_ai_intro_skip)
     - Short VODs: Whisper the full audio (same as YouTube fallback)
+    Moment detection still filters the intro even when full captions are kept on disk.
     """
     settings = settings or get_settings()
     work_dir = _job_dir(settings.resolved_temp_dir(), job_id)
@@ -947,7 +976,7 @@ def ensure_transcript(
     url = validate_public_http_url(source_url)
     is_yt = is_youtube_url(url)
 
-    # Custom window: only ASR the selected range (Kick/Twitch/YouTube).
+    # Custom window: only ASR the selected range (Kick/Twitch/YouTube). Never intro-skip.
     if time_range is not None:
         start, end = time_range
         if on_progress:
@@ -992,6 +1021,9 @@ def ensure_transcript(
             duration,
             settings=settings,
             on_progress=on_progress,
+            intro_skip_seconds=(
+                float(settings.ai_intro_skip_seconds) if apply_ai_intro_skip else 0.0
+            ),
         )
         if not segments:
             raise RuntimeError(

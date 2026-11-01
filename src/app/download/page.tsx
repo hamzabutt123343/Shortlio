@@ -1,12 +1,13 @@
 import Link from "next/link";
 import type { Metadata } from "next";
-import { MonitorSmartphone, HardDrive, Shield } from "lucide-react";
+import { HardDrive, Shield } from "lucide-react";
 import { BrandLogo } from "@/components/brand-logo";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { Button } from "@/components/ui";
+import { WindowsDownloadButton } from "@/components/windows-download-button";
 import { getSessionUser } from "@/lib/auth/session";
-import { DESKTOP_RELEASES_URL } from "@/lib/desktop";
+import { DESKTOP_DOWNLOAD_API_PATH } from "@/lib/desktop";
 
 export const metadata: Metadata = {
   title: "Download Shortlio for Windows",
@@ -40,13 +41,11 @@ export default async function DownloadPage() {
             older GitHub EXEs only wrap the website and cannot process video yet.
           </p>
 
-          <div className="mt-10 flex flex-wrap gap-3">
-            <a href={DESKTOP_RELEASES_URL} target="_blank" rel="noopener noreferrer">
-              <Button className="min-w-[200px] px-6 py-3">
-                <MonitorSmartphone className="mr-2 h-4 w-4" aria-hidden />
-                Get Windows installer
-              </Button>
-            </a>
+          <div className="mt-10 flex flex-wrap items-start gap-3">
+            <WindowsDownloadButton
+              label="Get Windows installer"
+              className="min-w-[200px] px-6 py-3"
+            />
             <Link href={user ? "/billing" : "/signup"}>
               <Button variant="secondary" className="px-6 py-3">
                 {user ? "Manage billing" : "Create account"}
@@ -70,16 +69,9 @@ export default async function DownloadPage() {
               </span>
             </li>
             <li>
-              Installer and portable builds are on{" "}
-              <a
-                href={DESKTOP_RELEASES_URL}
-                className="text-[var(--accent)] underline-offset-2 hover:underline"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                GitHub Releases
-              </a>
-              . Pick the latest <code className="text-[var(--text)]">.exe</code>.
+              Clicking download starts the latest Windows{" "}
+              <code className="text-[var(--text)]">.exe</code> immediately — you stay on Shortlio
+              (served via <code className="text-[var(--text)]">{DESKTOP_DOWNLOAD_API_PATH}</code>).
             </li>
           </ul>
         </div>

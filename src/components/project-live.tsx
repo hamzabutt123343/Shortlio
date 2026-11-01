@@ -12,10 +12,49 @@ interface ProjectPayload {
   clips: Clip[];
 }
 
+function pickActiveJob(jobs: Job[]): Job | undefined {
+  const active = jobs.find(
+    (j) =>
+      (j.status === "queued" || j.status === "processing") &&
+      j.progress_stage !== "ready" &&
+      j.progress_stage !== "failed" &&
+      j.progress_stage !== "cancelled",
+  );
+  return active || jobs[0];
+}
+
+function clipProgressHint(job: Job | undefined, clipsReady: number): string | null {
+  if (!job) return null;
+  const result = (job.result || {}) as Record<string, unknown>;
+  const total =
+    typeof result.clip_total === "number"
+      ? result.clip_total
+      : typeof job.requested_clip_count === "number"
+        ? job.requested_clip_count
+        : null;
+  const index = typeof result.clip_index === "number" ? result.clip_index : null;
+  const phase = typeof result.phase === "string" ? result.phase : null;
+  if (phase === "download_segments" && total) {
+    const done = typeof result.clip_done === "number" ? result.clip_done : 0;
+    return `Downloading segments ${done}/${total}`;
+  }
+  if (phase === "render_clip" && total && index !== null) {
+    return `Rendering clip ${index + 1} of ${total}`;
+  }
+  if (phase === "clip_ready" && total) {
+    return `Finished ${Math.min(clipsReady || (typeof result.clips === "object" && Array.isArray(result.clips) ? result.clips.length : 0), total)} of ${total} clips`;
+  }
+  if (total && clipsReady > 0 && (job.status === "processing" || job.status === "queued")) {
+    return `${clipsReady} of ${total} clips ready`;
+  }
+  return null;
+}
+
 export function ProjectLive({ projectId, initial }: { projectId: string; initial: ProjectPayload }) {
   const [data, setData] = useState(initial);
   const [cancelling, setCancelling] = useState(false);
-  const job = data.jobs[0];
+  const job = pickActiveJob(data.jobs);
+  const progressHint = clipProgressHint(job, data.clips.length);
 
   const refresh = useCallback(async () => {
     const res = await fetch(`/api/projects/${projectId}`, { cache: "no-store" });
@@ -34,7 +73,7 @@ export function ProjectLive({ projectId, initial }: { projectId: string; initial
     if (!active) return;
     const id = setInterval(() => {
       void refresh();
-    }, 2500);
+    }, 2000);
     return () => clearInterval(id);
   }, [job, refresh]);
 
@@ -75,6 +114,9 @@ export function ProjectLive({ projectId, initial }: { projectId: string; initial
               <span>{Math.round(job.progress_pct || 0)}%</span>
             </div>
             <ProgressBar value={job.progress_pct || 0} />
+            {progressHint && (
+              <p className="text-xs text-[var(--text-muted)]">{progressHint}</p>
+            )}
             {job.error_message && (
               <p className="text-sm text-[var(--danger)]">{job.error_message}</p>
             )}

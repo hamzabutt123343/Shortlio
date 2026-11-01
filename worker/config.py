@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
 
     segment_padding_seconds: float = Field(default=1.5, alias="SEGMENT_PADDING_SECONDS")
+    # AI viral detection ignores the opening N seconds (greetings / channel intros).
+    # Custom timestamp clipping is unaffected. Override via AI_INTRO_SKIP_SECONDS.
+    ai_intro_skip_seconds: float = Field(default=120.0, alias="AI_INTRO_SKIP_SECONDS")
     # AI mode hard cap (scout ASR samples long Kick/Twitch VODs; not full Whisper).
     max_source_duration_seconds: float = Field(
         default=28800.0, alias="MAX_SOURCE_DURATION_SECONDS"

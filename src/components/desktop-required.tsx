@@ -2,10 +2,10 @@
 
 import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
-import { MonitorSmartphone, RefreshCw } from "lucide-react";
 import { BrandLogo } from "@/components/brand-logo";
 import { Button } from "@/components/ui";
-import { DESKTOP_DOWNLOAD_PATH, DESKTOP_RELEASES_URL } from "@/lib/desktop";
+import { WindowsDownloadButton } from "@/components/windows-download-button";
+import { DESKTOP_DOWNLOAD_PATH } from "@/lib/desktop";
 import { isOutdatedElectronShell, isShortlioDesktop } from "@/lib/desktop-bridge";
 
 type Mode = "loading" | "desktop" | "outdated" | "browser";
@@ -55,12 +55,7 @@ export function DesktopRequired({ children }: { children: ReactNode }) {
           project.
         </p>
         <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-          <a href={DESKTOP_RELEASES_URL} target="_blank" rel="noopener noreferrer">
-            <Button className="px-5">
-              <RefreshCw className="mr-2 h-4 w-4" aria-hidden />
-              Get latest EXE
-            </Button>
-          </a>
+          <WindowsDownloadButton label="Get latest EXE" className="px-5" />
           <Link href={DESKTOP_DOWNLOAD_PATH}>
             <Button variant="secondary" className="px-5">
               Setup help
@@ -89,12 +84,7 @@ export function DesktopRequired({ children }: { children: ReactNode }) {
         bar should be a normal app window, not a browser with tabs).
       </p>
       <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-        <a href={DESKTOP_RELEASES_URL} target="_blank" rel="noopener noreferrer">
-          <Button className="px-5">
-            <MonitorSmartphone className="mr-2 h-4 w-4" aria-hidden />
-            Download / reinstall EXE
-          </Button>
-        </a>
+        <WindowsDownloadButton label="Download / reinstall EXE" className="px-5" />
         <Link href={DESKTOP_DOWNLOAD_PATH}>
           <Button variant="secondary" className="px-5">
             Setup help

@@ -1,8 +1,9 @@
 # Keep Vercel uploads small — web app only.
+# Anchor /desktop so we do NOT also exclude src/app/api/desktop (gitignore-style).
 node_modules
 .next
 .git
-desktop
+/desktop
 worker.zip
 worker/.venv
 worker/tmp

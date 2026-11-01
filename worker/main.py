@@ -5,6 +5,7 @@ import logging
 import shutil
 import signal
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,7 @@ from pipeline.metadata import (
     project_fields_from_metadata,
     project_fields_from_probe,
 )
-from pipeline.moments import MomentCandidate, analyze_moments
+from pipeline.moments import MomentCandidate, analyze_moments, effective_intro_skip_seconds
 from pipeline.render import OUTPUT_PRESETS, render_moment_clip
 from pipeline.source_platform import SourceAccessError, assert_source_usable
 from pipeline.stages import ProgressStage, should_run_stage
@@ -118,6 +119,7 @@ def _load_or_build_transcript(
     local_media_path: Path | None = None,
     time_range: tuple[float, float] | None = None,
     source_duration: float | None = None,
+    apply_ai_intro_skip: bool = False,
 ) -> list[TranscriptSegment]:
     segments = load_cached_transcript(work_dir)
     from_db = False
@@ -158,6 +160,7 @@ def _load_or_build_transcript(
             local_media_path=local_media_path,
             time_range=time_range,
             source_duration=source_duration,
+            apply_ai_intro_skip=apply_ai_intro_skip,
         )
         if project_id:
             _persist_transcript(
@@ -210,6 +213,65 @@ def _targets_from_candidate_rows(rows: list[dict[str, Any]]) -> list[RenderTarge
     return out
 
 
+def _download_segments_for_targets(
+    *,
+    job_id: str,
+    source_url: str,
+    targets: list[RenderTarget],
+    settings,
+    local_media_path: Path | None,
+    check_cancel,
+    on_progress,
+) -> list[Path]:
+    """Download clip windows; parallelize when rendering 2+ clips (bounded pool)."""
+    n = len(targets)
+    if n == 0:
+        return []
+
+    segment_paths: list[Path | None] = [None] * n
+
+    def _one(i: int, target: RenderTarget) -> tuple[int, Path]:
+        moment = target.moment
+        path = download_moment_segment(
+            job_id=job_id,
+            source_url=source_url,
+            start=moment.start,
+            end=moment.end,
+            index=i,
+            settings=settings,
+            local_media_path=local_media_path,
+        )
+        return i, path
+
+    # Single clip — keep simple sequential path (no thread overhead).
+    if n == 1 or local_media_path is not None:
+        for i, target in enumerate(targets):
+            if check_cancel():
+                return []
+            _, path = _one(i, target)
+            segment_paths[i] = path
+            on_progress(i + 1, n)
+        return [p for p in segment_paths if p is not None]
+
+    workers = min(3, n)
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_one, i, t): i for i, t in enumerate(targets)}
+        for fut in as_completed(futures):
+            if check_cancel():
+                for pending in futures:
+                    pending.cancel()
+                return []
+            i, path = fut.result()
+            segment_paths[i] = path
+            done += 1
+            on_progress(done, n)
+
+    if any(p is None for p in segment_paths):
+        raise RuntimeError("Failed to download one or more clip segments")
+    return [p for p in segment_paths if p is not None]
+
+
 def _render_and_upload_clips(
     repo: JobRepository,
     *,
@@ -232,38 +294,83 @@ def _render_and_upload_clips(
     crop_settings: dict[str, Any] | None = None,
     local_media_path: Path | None = None,
 ) -> list[dict[str, Any]]:
-    repo.update_progress(job_id, progress_stage=ProgressStage.FETCHING_SELECTED_SEGMENTS, progress_pct=45)
-    segment_paths: list[Path] = []
-    for i, target in enumerate(targets):
-        if check_cancel():
-            return []
-        moment = target.moment
-        seg_path = download_moment_segment(
-            job_id=job_id,
-            source_url=source_url,
-            start=moment.start,
-            end=moment.end,
-            index=i,
-            settings=settings,
-            local_media_path=local_media_path,
-        )
-        segment_paths.append(seg_path)
-        pct = 45 + (i + 1) / len(targets) * 15
+    total = max(1, len(targets))
+    repo.update_progress(
+        job_id,
+        progress_stage=ProgressStage.FETCHING_SELECTED_SEGMENTS,
+        progress_pct=45,
+        partial_result={"phase": "download_segments", "clip_total": total, "clip_done": 0},
+    )
+
+    def _on_dl_progress(done: int, n: int) -> None:
+        pct = 45 + done / max(1, n) * 15
         repo.update_progress(
-            job_id, progress_stage=ProgressStage.FETCHING_SELECTED_SEGMENTS, progress_pct=pct
+            job_id,
+            progress_stage=ProgressStage.FETCHING_SELECTED_SEGMENTS,
+            progress_pct=pct,
+            partial_result={
+                "phase": "download_segments",
+                "clip_total": n,
+                "clip_done": done,
+            },
         )
+
+    segment_paths = _download_segments_for_targets(
+        job_id=job_id,
+        source_url=source_url,
+        targets=targets,
+        settings=settings,
+        local_media_path=local_media_path,
+        check_cancel=check_cancel,
+        on_progress=_on_dl_progress,
+    )
+    if not segment_paths:
+        return []
 
     if check_cancel():
         return []
 
-    repo.update_progress(job_id, progress_stage=ProgressStage.DETECTING_SUBJECTS, progress_pct=62)
-    repo.update_progress(job_id, progress_stage=ProgressStage.RENDERING_CLIPS, progress_pct=65)
+    # Hoist project metadata once — used for viral titles on every clip.
+    source_title = ""
+    source_channel = ""
+    source_uploader = ""
+    source_platform = ""
+    if project_id:
+        try:
+            project_row = repo.get_project(project_id)
+            if project_row:
+                source_title = str(project_row.get("source_title") or "")
+                source_platform = str(project_row.get("source_platform") or "")
+                source_meta = project_row.get("source_metadata") or {}
+                if isinstance(source_meta, dict):
+                    source_channel = str(source_meta.get("channel") or "")
+                    source_uploader = str(source_meta.get("uploader") or "")
+                    if not source_platform:
+                        source_platform = str(
+                            source_meta.get("shortlio_platform") or ""
+                        )
+        except Exception as proj_exc:
+            logger.warning("Could not load project metadata: %s", proj_exc)
 
     clips_out: list[dict[str, Any]] = []
     for i, (target, seg_path) in enumerate(zip(targets, segment_paths)):
         if check_cancel():
             return []
         moment = target.moment
+        # Real progress before expensive reframe+encode (not after).
+        start_pct = 60 + i / total * 35
+        repo.update_progress(
+            job_id,
+            progress_stage=ProgressStage.RENDERING_CLIPS,
+            progress_pct=start_pct,
+            partial_result={
+                "phase": "render_clip",
+                "clip_index": i,
+                "clip_total": total,
+                "clip_title": moment.title,
+                "clips": clips_out,
+            },
+        )
         rendered, plan = render_moment_clip(
             job_id=job_id,
             index=i,
@@ -303,23 +410,6 @@ def _render_and_upload_clips(
                 surround = surrounding_context_text(
                     segments, moment.start, moment.end
                 )
-                source_title = ""
-                source_channel = ""
-                source_uploader = ""
-                source_platform = ""
-                if project_id:
-                    project_row = repo.get_project(project_id)
-                    if project_row:
-                        source_title = str(project_row.get("source_title") or "")
-                        source_platform = str(project_row.get("source_platform") or "")
-                        source_meta = project_row.get("source_metadata") or {}
-                        if isinstance(source_meta, dict):
-                            source_channel = str(source_meta.get("channel") or "")
-                            source_uploader = str(source_meta.get("uploader") or "")
-                            if not source_platform:
-                                source_platform = str(
-                                    source_meta.get("shortlio_platform") or ""
-                                )
                 viral_meta = generate_viral_metadata(
                     transcript=clip_text,
                     clip_title=moment.title,
@@ -367,12 +457,17 @@ def _render_and_upload_clips(
         if clip_row and clip_row.get("id"):
             entry["clip_id"] = clip_row["id"]
         clips_out.append(entry)
-        pct = 65 + (i + 1) / len(targets) * 30
+        done_pct = 60 + (i + 1) / total * 35
         repo.update_progress(
             job_id,
             progress_stage=ProgressStage.RENDERING_CLIPS,
-            progress_pct=pct,
-            partial_result={"clips": clips_out},
+            progress_pct=done_pct,
+            partial_result={
+                "phase": "clip_ready",
+                "clip_index": i,
+                "clip_total": total,
+                "clips": clips_out,
+            },
         )
     return clips_out
 
@@ -538,6 +633,8 @@ def _process_full_pipeline(
             local_media_path=live_file,
             time_range=time_range,
             source_duration=probe.duration,
+            # Kick/Twitch scout ASR skips intro only in AI mode; custom windows untouched.
+            apply_ai_intro_skip=(clip_mode == "ai"),
         )
         if not segments:
             return
@@ -562,6 +659,7 @@ def _process_full_pipeline(
         analyzed_fresh = False
 
         if clip_mode == "custom":
+            # Exact user window — never apply AI intro skip.
             candidates = [
                 MomentCandidate(
                     start=custom_start,
@@ -595,12 +693,23 @@ def _process_full_pipeline(
             clip_count = 1
         elif moments_raw and isinstance(moments_raw, list):
             candidates = [_moment_from_dict(m) for m in moments_raw]
+            # Resume path: still drop any stale intro-window picks.
+            intro_skip = effective_intro_skip_seconds(
+                float(settings.ai_intro_skip_seconds),
+                segments,
+                max_clip_duration=max_clip_duration,
+            )
+            if intro_skip > 0:
+                filtered = [c for c in candidates if c.start >= intro_skip]
+                if filtered:
+                    candidates = filtered
         else:
             candidates = analyze_moments(
                 segments,
                 clip_count=clip_count,
                 max_clip_duration=max_clip_duration,
                 settings=settings,
+                intro_skip_seconds=float(settings.ai_intro_skip_seconds),
             )
             analyzed_fresh = True
 

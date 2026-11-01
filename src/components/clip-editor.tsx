@@ -32,6 +32,8 @@ import {
   type StackDirection,
 } from "@/lib/framing";
 import { ViralMetadataPanel } from "@/components/viral-metadata-panel";
+import { isShortlioDesktop } from "@/lib/desktop-bridge";
+import { parseLocalClipPath } from "@/lib/local-clip-path";
 import { startDesktopJob } from "@/lib/start-desktop-job";
 import type { Clip } from "@/lib/types";
 import type { ViralMetadata } from "@/lib/viral-metadata/types";
@@ -59,6 +61,14 @@ function readCropSettings(raw: unknown) {
   });
 }
 
+function isHttpPlaybackUrl(url: string | null | undefined): boolean {
+  return Boolean(url && /^https?:\/\//i.test(url));
+}
+
+function isShortlioLocalUrl(url: string | null | undefined): boolean {
+  return Boolean(url && /^shortlio-local:/i.test(url));
+}
+
 export function ClipEditor({
   initialClip,
   initialSignedUrl,
@@ -70,7 +80,16 @@ export function ClipEditor({
 }) {
   const initialCrop = readCropSettings(initialClip.crop_settings);
   const [clip, setClip] = useState(initialClip);
-  const [signedUrl, setSignedUrl] = useState(initialSignedUrl);
+  // Never mount shortlio-local:// into <video> on desktop — Chromium reports
+  // MEDIA_ERR_SRC_NOT_SUPPORTED. Wait for http://127.0.0.1 media-server URL.
+  const initialLocalPath = parseLocalClipPath(initialClip.storage_path);
+  const [signedUrl, setSignedUrl] = useState<string | null>(() => {
+    if (initialLocalPath && isShortlioLocalUrl(initialSignedUrl)) return null;
+    return initialSignedUrl;
+  });
+  const [mediaResolving, setMediaResolving] = useState(() =>
+    Boolean(initialLocalPath),
+  );
   const [transcript, setTranscript] = useState(initialTranscript);
   const [title, setTitle] = useState(initialClip.title);
   const [startTime, setStartTime] = useState(String(initialClip.start_time));
@@ -112,6 +131,7 @@ export function ClipEditor({
   const [error, setError] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [videoError, setVideoError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const playerShellRef = useRef<HTMLDivElement | null>(null);
   const prevRenderStatus = useRef(initialClip.render_status);
@@ -251,8 +271,29 @@ export function ClipEditor({
       // like the preview is endlessly refreshing. Only swap when the file changes.
       if (data.signedUrl && (pathChanged || becameReady)) {
         storagePathRef.current = next.storage_path;
-        setSignedUrl(data.signedUrl);
-        setVideoRevision((n) => n + 1);
+        const localPath = parseLocalClipPath(next.storage_path);
+        if (localPath && window.shortlioDesktop?.resolveMediaUrl) {
+          setMediaResolving(true);
+          const media = await window.shortlioDesktop.resolveMediaUrl(localPath);
+          setMediaResolving(false);
+          if (media.ok && media.url && isHttpPlaybackUrl(media.url)) {
+            setSignedUrl(media.url);
+            setVideoError(null);
+            setVideoRevision((n) => n + 1);
+          } else {
+            setSignedUrl(null);
+            setVideoError(media.error || "Could not open local clip for preview");
+          }
+        } else if (localPath && isShortlioDesktop()) {
+          // Stale desktop without resolveMediaUrl — don't feed shortlio-local to <video>.
+          setSignedUrl(null);
+          setVideoError("Update the Shortlio desktop app to preview local clips.");
+          setMediaResolving(false);
+        } else {
+          setSignedUrl(data.signedUrl);
+          setVideoError(null);
+          setVideoRevision((n) => n + 1);
+        }
       }
 
       if (becameReady) {
@@ -266,6 +307,48 @@ export function ClipEditor({
     }, 3000);
     return () => clearInterval(id);
   }, [clip.id, clip.render_status]);
+
+  // Prefer localhost HTTP media URLs inside Electron — custom protocols often fail.
+  useEffect(() => {
+    const localPath = parseLocalClipPath(clip.storage_path);
+    if (!localPath) {
+      setMediaResolving(false);
+      return;
+    }
+    if (!isShortlioDesktop()) {
+      setMediaResolving(false);
+      setSignedUrl(null);
+      return;
+    }
+    const resolveMedia = window.shortlioDesktop?.resolveMediaUrl;
+    if (!resolveMedia) {
+      setMediaResolving(false);
+      setSignedUrl(null);
+      setVideoError("Update the Shortlio desktop app to preview local clips.");
+      return;
+    }
+    let cancelled = false;
+    setMediaResolving(true);
+    void (async () => {
+      const res = await resolveMedia(localPath);
+      if (cancelled) return;
+      setMediaResolving(false);
+      if (res?.ok && res.url && isHttpPlaybackUrl(res.url)) {
+        setSignedUrl((prev) => {
+          if (prev === res.url) return prev;
+          setVideoRevision((n) => n + 1);
+          return res.url!;
+        });
+        setVideoError(null);
+        return;
+      }
+      setSignedUrl(null);
+      setVideoError(res?.error || "Could not open local clip for preview");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [clip.storage_path]);
 
   useEffect(() => {
     if (transcript.length) return;
@@ -396,12 +479,16 @@ export function ClipEditor({
           ref={playerShellRef}
           className="relative aspect-[9/16] max-h-[640px] overflow-hidden rounded-[12px] border border-[var(--border)] bg-black"
         >
-          {signedUrl ? (
+          {signedUrl &&
+          isHttpPlaybackUrl(signedUrl) &&
+          !(parseLocalClipPath(clip.storage_path) && !isShortlioDesktop()) ? (
             <video
               ref={videoRef}
               key={`${clip.storage_path ?? clip.id}:${videoRevision}`}
               src={signedUrl}
               controls
+              playsInline
+              preload="metadata"
               // Keep live overlay in sync — native video fullscreen would drop the HTML layer.
               controlsList="nofullscreen"
               className="h-full w-full object-contain"
@@ -409,16 +496,49 @@ export function ClipEditor({
               onPlay={() => setPlaying(true)}
               onPause={() => setPlaying(false)}
               onLoadedMetadata={(e) => {
+                setVideoError(null);
                 // Disable any soft subtitle tracks so the browser never paints a 2nd layer.
                 const tracks = e.currentTarget.textTracks;
                 for (let i = 0; i < tracks.length; i++) {
                   tracks[i].mode = "disabled";
                 }
               }}
+              onError={() => {
+                const media = videoRef.current;
+                const code = media?.error?.code;
+                const hint =
+                  code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
+                    ? "format or protocol not supported"
+                    : code === MediaError.MEDIA_ERR_NETWORK
+                      ? "network / file access error"
+                      : code === MediaError.MEDIA_ERR_DECODE
+                        ? "decode error"
+                        : "playback failed";
+                setVideoError(hint);
+                setPlaying(false);
+              }}
             />
           ) : (
-            <div className="flex h-full items-center justify-center text-sm text-[var(--text-muted)]">
-              Preview unavailable until render completes
+            <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-[var(--text-muted)]">
+              {parseLocalClipPath(clip.storage_path) && !isShortlioDesktop() ? (
+                <>
+                  <p>Local clips play in the Shortlio desktop app.</p>
+                  <p className="text-xs">
+                    File is on this PC under Videos\Shortlio — open the desktop app to preview.
+                  </p>
+                </>
+              ) : mediaResolving ? (
+                <p>Loading local preview…</p>
+              ) : videoError && isShortlioDesktop() ? (
+                <p className="text-[var(--danger)]">Preview error: {videoError}</p>
+              ) : (
+                <p>Preview unavailable until render completes</p>
+              )}
+            </div>
+          )}
+          {videoError && signedUrl && isShortlioDesktop() && (
+            <div className="pointer-events-none absolute inset-x-0 bottom-10 z-[4] px-3 text-center text-xs text-[var(--danger)]">
+              Preview error: {videoError}
             </div>
           )}
           {showLiveOverlay && (

@@ -1,7 +1,11 @@
 import { getShortlioDesktop } from "@/lib/desktop-bridge";
 import { createClient } from "@/lib/supabase/client";
 
-/** Start the bundled local engine for a queued job (no-op in browser). */
+/**
+ * Start the bundled local engine for a queued job (no-op in browser).
+ * Returns quickly once the engine process is spawned/queued — does not wait
+ * for render completion (project/clip pages poll job progress).
+ */
 export async function startDesktopJob(jobId: string): Promise<string | null> {
   const desktop = getShortlioDesktop();
   if (!desktop || !jobId) return null;

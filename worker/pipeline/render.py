@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -152,8 +153,10 @@ def render_clip(
             "+faststart",
             "-fflags",
             "+genpts",
+            # Cap threads so multi-clip jobs (and OS UI) stay responsive; 0 = all cores
+            # can starve the machine when several encodes overlap.
             "-threads",
-            "0",
+            str(max(1, min(4, (os.cpu_count() or 4)))),
             str(output_path),
         ]
     )

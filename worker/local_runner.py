@@ -14,6 +14,7 @@ import logging
 import os
 import socket
 import sys
+import threading
 
 # Desktop product defaults before Settings is constructed.
 os.environ.setdefault("OUTPUT_MODE", "local")
@@ -25,6 +26,29 @@ from http_repo import HttpJobRepository
 from main import process_job
 
 logger = logging.getLogger(__name__)
+
+
+def _run_with_heartbeat(repo: HttpJobRepository, worker_id: str, job: dict, settings) -> None:
+    """Keep job lease alive during long multi-clip FFmpeg / download stretches."""
+    job_id = str(job["id"])
+    stop_hb = threading.Event()
+
+    def heartbeat_loop() -> None:
+        while not stop_hb.wait(15.0):
+            try:
+                if repo.is_cancelled(job_id):
+                    return
+                repo.heartbeat(job_id, worker_id)
+            except Exception:
+                logger.exception("Heartbeat failed for %s", job_id)
+
+    hb_thread = threading.Thread(target=heartbeat_loop, daemon=True, name=f"hb-{job_id[:8]}")
+    hb_thread.start()
+    try:
+        process_job(job, repo=repo, settings=settings)
+    finally:
+        stop_hb.set()
+        hb_thread.join(timeout=2.0)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,14 +72,19 @@ def main(argv: list[str] | None = None) -> int:
     repo = HttpJobRepository(settings=settings)
     job_id = args.job_id.strip()
     logger.info("Claiming job %s as %s", job_id, worker_id)
-    job = repo.claim_job(worker_id, job_id)
+    try:
+        job = repo.claim_job(worker_id, job_id)
+    except Exception as exc:
+        logger.exception("Failed to claim job %s", job_id)
+        print(f"Claim failed: {exc}", file=sys.stderr)
+        return 1
     if not job:
         logger.error("Failed to claim job %s", job_id)
         return 1
 
     logger.info("Processing job %s (type=%s)", job_id, job.get("job_type"))
     try:
-        process_job(job, repo=repo, settings=settings)
+        _run_with_heartbeat(repo, worker_id, job, settings)
     except Exception:
         logger.exception("Job %s crashed", job_id)
         try:

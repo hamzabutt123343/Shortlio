@@ -7,6 +7,10 @@ const { app, shell } = require("electron");
 /** @type {Map<string, import('child_process').ChildProcess>} */
 const running = new Map();
 
+/** @type {{ jobId: string, accessToken: string }[]} */
+const jobQueue = [];
+let drainingQueue = false;
+
 function resourcesRoot() {
   // Packaged: resources/ next to app.asar. Dev: desktop/resources/
   if (app.isPackaged) {
@@ -139,20 +143,22 @@ function engineStatus() {
   };
 }
 
-/**
- * @param {{ jobId: string, accessToken: string }} opts
- */
-function runJob({ jobId, accessToken }) {
-  return new Promise((resolve) => {
-    if (!jobId || !accessToken) {
-      resolve({ ok: false, error: "jobId and accessToken are required" });
-      return;
-    }
-    if (running.has(jobId)) {
-      resolve({ ok: false, error: "Job is already running locally" });
-      return;
-    }
+function activeJobCount() {
+  let n = 0;
+  for (const child of running.values()) {
+    if (child.exitCode === null && !child.killed) n += 1;
+  }
+  return n;
+}
 
+/**
+ * Spawn one local_runner. Resolves once the process has started (or failed to spawn),
+ * NOT when the job finishes — UI should poll job progress on the project/clip page.
+ * @param {{ jobId: string, accessToken: string }} opts
+ * @returns {Promise<{ ok: boolean, error?: string }>}
+ */
+function spawnJobProcess({ jobId, accessToken }) {
+  return new Promise((resolve) => {
     const python = findEnginePython();
     const workerRoot = findWorkerRoot();
     if (!python || !workerRoot) {
@@ -165,7 +171,12 @@ function runJob({ jobId, accessToken }) {
     }
 
     const tokenFile = tokenPathFor(jobId);
-    fs.writeFileSync(tokenFile, accessToken, "utf8");
+    try {
+      fs.writeFileSync(tokenFile, accessToken, "utf8");
+    } catch (err) {
+      resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
 
     const ffmpeg = findBinary("ffmpeg");
     const ffprobe = findBinary("ffprobe");
@@ -183,7 +194,7 @@ function runJob({ jobId, accessToken }) {
       TRANSCRIPTION_PROVIDER: "groq_proxy",
       LLM_PROVIDER: "heuristic",
       WORKER_CONCURRENCY: "1",
-      YTDLP_JS_RUNTIME: nodeBin === "node" ? "node" : "node",
+      YTDLP_JS_RUNTIME: "node",
       PATH: [
         path.dirname(nodeBin !== "node" ? nodeBin : python),
         ffmpeg ? path.dirname(ffmpeg) : "",
@@ -194,10 +205,6 @@ function runJob({ jobId, accessToken }) {
     };
     if (ffmpeg) env.FFMPEG_PATH = ffmpeg;
     if (ffprobe) env.FFPROBE_PATH = ffprobe;
-    if (nodeBin !== "node") {
-      env.YTDLP_JS_RUNTIME = "node";
-      // yt-dlp resolves `node` from PATH; we already prepended dirname
-    }
     // Desktop never needs cloud service role — leave unset so it cannot leak.
     delete env.SUPABASE_SERVICE_ROLE_KEY;
     delete env.GROQ_API_KEY;
@@ -211,21 +218,40 @@ function runJob({ jobId, accessToken }) {
     }
 
     const args = ["local_runner.py", "--job-id", jobId];
-    const child = spawn(python, args, {
-      cwd: workerRoot,
-      env,
-      windowsHide: true,
-    });
-    running.set(jobId, child);
+    let child;
+    try {
+      child = spawn(python, args, {
+        cwd: workerRoot,
+        env,
+        windowsHide: true,
+      });
+    } catch (err) {
+      try {
+        fs.unlinkSync(tokenFile);
+      } catch {
+        // ignore
+      }
+      resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
 
-    let stderr = "";
+    running.set(jobId, child);
+    let settled = false;
+    const settleOk = () => {
+      if (settled) return;
+      settled = true;
+      resolve({ ok: true });
+    };
+
     child.stdout?.on("data", (buf) => {
       console.log(`[engine ${jobId}]`, buf.toString("utf8").trimEnd());
     });
     child.stderr?.on("data", (buf) => {
-      const text = buf.toString("utf8");
-      stderr += text;
-      console.error(`[engine ${jobId}]`, text.trimEnd());
+      console.error(`[engine ${jobId}]`, buf.toString("utf8").trimEnd());
+    });
+
+    child.on("spawn", () => {
+      settleOk();
     });
 
     child.on("error", (err) => {
@@ -235,7 +261,11 @@ function runJob({ jobId, accessToken }) {
       } catch {
         // ignore
       }
-      resolve({ ok: false, error: err.message });
+      if (!settled) {
+        settled = true;
+        resolve({ ok: false, error: err.message });
+      }
+      void pumpQueue();
     });
 
     child.on("exit", (code) => {
@@ -245,19 +275,82 @@ function runJob({ jobId, accessToken }) {
       } catch {
         // ignore
       }
-      if (code === 0) {
-        resolve({ ok: true });
-      } else {
-        resolve({
-          ok: false,
-          error: `Engine exited with code ${code}${stderr ? `: ${stderr.slice(-500)}` : ""}`,
-        });
+      if (!settled) {
+        // Spawn event missed (rare on some Node builds) — treat non-immediate exit as started.
+        if (code === 0 || code === null) settleOk();
+        else {
+          settled = true;
+          resolve({
+            ok: false,
+            error: `Engine exited with code ${code} before processing began`,
+          });
+        }
+      } else if (code && code !== 0) {
+        console.error(`[engine ${jobId}] exited with code ${code}`);
       }
+      void pumpQueue();
     });
+
+    // Windows sometimes omits 'spawn'; resolve after a short tick if still alive.
+    setTimeout(() => {
+      if (!settled && running.has(jobId)) settleOk();
+    }, 250);
   });
 }
 
+async function pumpQueue() {
+  if (drainingQueue) return;
+  drainingQueue = true;
+  try {
+    while (jobQueue.length > 0 && activeJobCount() === 0) {
+      const next = jobQueue.shift();
+      if (!next) break;
+      if (running.has(next.jobId)) continue;
+      const result = await spawnJobProcess(next);
+      if (!result.ok) {
+        console.error(`[engine] queued job ${next.jobId} failed to start:`, result.error);
+      }
+    }
+  } finally {
+    drainingQueue = false;
+  }
+}
+
+/**
+ * @param {{ jobId: string, accessToken: string }} opts
+ */
+async function runJob({ jobId, accessToken }) {
+  if (!jobId || !accessToken) {
+    return { ok: false, error: "jobId and accessToken are required" };
+  }
+  if (running.has(jobId) || jobQueue.some((j) => j.jobId === jobId)) {
+    return { ok: true }; // already queued/running — UI can poll
+  }
+
+  const python = findEnginePython();
+  const workerRoot = findWorkerRoot();
+  if (!python || !workerRoot) {
+    return {
+      ok: false,
+      error:
+        "Local engine not found or broken (Python missing). Reinstall the latest Shortlio Desktop release, or run desktop/scripts/bundle-engine.ps1 for a local build.",
+    };
+  }
+
+  // One engine process at a time — avoids N× FFmpeg -threads 0 thrashing.
+  if (activeJobCount() > 0) {
+    jobQueue.push({ jobId, accessToken });
+    console.log(`[engine] queued job ${jobId} (${jobQueue.length} waiting)`);
+    return { ok: true };
+  }
+
+  return spawnJobProcess({ jobId, accessToken });
+}
+
 function cancelJob(jobId) {
+  const qi = jobQueue.findIndex((j) => j.jobId === jobId);
+  if (qi >= 0) jobQueue.splice(qi, 1);
+
   const child = running.get(jobId);
   if (!child) return { ok: true };
   try {
@@ -266,6 +359,7 @@ function cancelJob(jobId) {
     // ignore
   }
   running.delete(jobId);
+  void pumpQueue();
   return { ok: true };
 }
 

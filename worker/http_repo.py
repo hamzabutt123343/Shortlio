@@ -13,6 +13,26 @@ from pipeline.transcript import TranscriptSegment
 logger = logging.getLogger(__name__)
 
 
+def _api_error_detail(resp: httpx.Response, *, limit: int = 400) -> str:
+    """Readable error text for API failures (avoid dumping Next.js HTML 404 pages)."""
+    text = (resp.text or "").strip()
+    ctype = (resp.headers.get("content-type") or "").lower()
+    if "text/html" in ctype or text[:1] == "<" or "<!DOCTYPE" in text[:32].upper():
+        return (
+            f"got HTML {resp.status_code} from {resp.request.url!s} "
+            "(desktop API missing on the app host — redeploy web with /api/desktop routes)"
+        )
+    try:
+        data = resp.json()
+        if isinstance(data, dict):
+            err = data.get("error") or data.get("message")
+            if err:
+                return str(err)[:limit]
+    except Exception:
+        pass
+    return text[:limit] or f"HTTP {resp.status_code}"
+
+
 class HttpJobRepository:
     """JobRepository-compatible client that talks to /api/desktop/* with a user JWT."""
 
@@ -42,7 +62,7 @@ class HttpJobRepository:
             )
             if resp.status_code >= 400:
                 raise RuntimeError(
-                    f"desktop repo {action} failed ({resp.status_code}): {resp.text[:800]}"
+                    f"desktop repo {action} failed ({resp.status_code}): {_api_error_detail(resp)}"
                 )
             data = resp.json()
             return data.get("data")
@@ -56,7 +76,7 @@ class HttpJobRepository:
             )
             if resp.status_code >= 400:
                 raise RuntimeError(
-                    f"claim failed ({resp.status_code}): {resp.text[:800]}"
+                    f"claim failed ({resp.status_code}): {_api_error_detail(resp)}"
                 )
             return (resp.json() or {}).get("job")
 

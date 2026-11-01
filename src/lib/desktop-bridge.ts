@@ -12,6 +12,10 @@ export type ShortlioDesktopBridge = {
     runningJobId: string | null;
     clipsDir: string;
   }>;
+  /** Preferred playback URL for local: clips (http://127.0.0.1 with Range support). */
+  resolveMediaUrl?: (
+    fsPath: string,
+  ) => Promise<{ ok: boolean; url?: string; error?: string }>;
 };
 
 declare global {
