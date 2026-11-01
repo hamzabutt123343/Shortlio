@@ -50,6 +50,9 @@ desktop/resources/bin/**
 # worker
 worker/.venv/
 worker/tmp/
+worker/tmp_*/
+worker/tmp_*.txt
+worker.zip
 worker/**/__pycache__/
 *.pyc
 
@@ -72,3 +75,6 @@ supabase/.temp/
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+.vercel
+.env*

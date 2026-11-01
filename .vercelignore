@@ -1,0 +1,20 @@
+# Keep Vercel uploads small — web app only.
+node_modules
+.next
+.git
+desktop
+worker.zip
+worker/.venv
+worker/tmp
+worker/tmp_caption_verify
+worker/tmp_hinglish_test.txt
+.pytest_cache
+*.zip
+*.pyc
+__pycache__
+docs
+FIXES_REPORT.md
+IMPLEMENTATION_CHECKLIST.md
+IMPLEMENTATION_SUMMARY.md
+QUICK_REFERENCE.md
+scripts/push-vercel-env.mjs
