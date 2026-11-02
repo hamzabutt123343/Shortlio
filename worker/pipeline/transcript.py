@@ -536,6 +536,7 @@ def build_scout_transcript(
     settings: Settings | None = None,
     on_progress: ProgressCb | None = None,
     intro_skip_seconds: float | None = None,
+    min_chunk_seconds: float | None = None,
 ) -> list[TranscriptSegment]:
     """Whisper spaced samples across a long Kick/Twitch VOD — same later stages as YouTube."""
     settings = settings or get_settings()
@@ -546,10 +547,16 @@ def build_scout_transcript(
     )
     # Keep room for scout chunks after the intro on short-ish VODs.
     skip = max(0.0, min(skip, max(0.0, float(duration) - 60.0)))
+    # Chunk must be ≥ selected clip length so 60s/120s targets fit inside one sample.
+    chunk = max(
+        float(settings.asr_scout_chunk_seconds),
+        float(min_chunk_seconds or 0.0),
+        30.0,
+    )
     windows = _scout_windows(
         duration,
         budget=float(settings.asr_scout_budget_seconds),
-        chunk=float(settings.asr_scout_chunk_seconds),
+        chunk=chunk,
         skip_start=skip,
     )
     logger.info(
@@ -945,6 +952,8 @@ def ensure_transcript(
     source_duration: float | None = None,
     # When True (AI mode), scout ASR skips the opening intro. Custom time_range ignores this.
     apply_ai_intro_skip: bool = False,
+    # Ensure Kick/Twitch scout windows can cover the user-selected clip duration.
+    min_scout_chunk_seconds: float | None = None,
 ) -> list[TranscriptSegment]:
     """Build a transcript the same way for every platform: captions if any → else ASR → moments.
 
@@ -1024,6 +1033,7 @@ def ensure_transcript(
             intro_skip_seconds=(
                 float(settings.ai_intro_skip_seconds) if apply_ai_intro_skip else 0.0
             ),
+            min_chunk_seconds=min_scout_chunk_seconds,
         )
         if not segments:
             raise RuntimeError(

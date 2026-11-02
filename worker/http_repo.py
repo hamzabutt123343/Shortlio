@@ -192,6 +192,32 @@ class HttpJobRepository:
         )
         return list(data or [])
 
+    def fetch_prior_clip_ranges(
+        self,
+        *,
+        user_id: str,
+        source_url: str,
+        exclude_project_id: str | None = None,
+        limit: int = 80,
+    ) -> list[tuple[float, float]]:
+        data = self._post_repo(
+            "fetch_prior_clip_ranges",
+            userId=user_id,
+            sourceUrl=source_url,
+            excludeProjectId=exclude_project_id,
+            limit=limit,
+        )
+        out: list[tuple[float, float]] = []
+        for row in data or []:
+            try:
+                if isinstance(row, (list, tuple)) and len(row) >= 2:
+                    out.append((float(row[0]), float(row[1])))
+                elif isinstance(row, dict):
+                    out.append((float(row["start"]), float(row["end"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
+
     def get_clip(self, clip_id: str) -> dict[str, Any] | None:
         return self._post_repo("get_clip", clipId=clip_id)
 

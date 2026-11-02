@@ -221,15 +221,14 @@ export async function runDesktopRepoAction(
       if (!project || project.user_id !== user.id) throw new Error("Forbidden");
       await admin.from("clip_candidates").delete().eq("project_id", projectId);
       if (!candidates.length) return [];
-      const sorted = [...candidates].sort(
-        (a, b) =>
-          Number((b as Record<string, unknown>).score || 0) -
-          Number((a as Record<string, unknown>).score || 0),
-      );
-      const rows = sorted.map((c, i) => {
+      // Preserve analyzer order (first N = variety-aware selection). Explicit
+      // `selected` on a candidate wins when present.
+      const rows = candidates.map((c, i) => {
         const cand = c as Record<string, unknown>;
         const start = Number(cand.start);
         const end = Number(cand.end);
+        const selected =
+          typeof cand.selected === "boolean" ? cand.selected : i < selectedCount;
         return {
           project_id: projectId,
           start_time: start,
@@ -240,7 +239,7 @@ export async function runDesktopRepoAction(
           explanation: cand.explanation ?? null,
           confidence: cand.confidence ?? null,
           recommended_duration: cand.recommended_duration ?? Math.max(0, end - start),
-          selected: i < selectedCount,
+          selected,
         };
       });
       const inserted: unknown[] = [];
@@ -295,6 +294,55 @@ export async function runDesktopRepoAction(
       if (error) throw error;
       const byId = new Map((data || []).map((r) => [String(r.id), r]));
       return ids.map((id) => byId.get(id)).filter(Boolean);
+    }
+    case "fetch_prior_clip_ranges": {
+      const sourceUrl = String(body.sourceUrl || "").trim();
+      const excludeProjectId = body.excludeProjectId
+        ? String(body.excludeProjectId)
+        : null;
+      const limit = Math.max(1, Math.min(200, Number(body.limit ?? 80)));
+      if (!sourceUrl) return [];
+      // Always scope to the authenticated user (ignore body.userId spoofing).
+      const ranges: { start: number; end: number }[] = [];
+      const seen = new Set<string>();
+      const push = (start: number, end: number) => {
+        if (!(end > start)) return;
+        const key = `${Math.round(start * 10)}:${Math.round(end * 10)}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        ranges.push({ start, end });
+      };
+
+      const { data: clipRows, error: clipErr } = await admin
+        .from("clips")
+        .select("start_time,end_time,project_id,projects!inner(source_url,user_id)")
+        .eq("user_id", user.id)
+        .eq("projects.source_url", sourceUrl)
+        .order("created_at", { ascending: false })
+        .limit(limit);
+      if (clipErr) throw clipErr;
+      for (const row of clipRows || []) {
+        if (excludeProjectId && String(row.project_id) === excludeProjectId) continue;
+        push(Number(row.start_time), Number(row.end_time));
+      }
+
+      const { data: candRows, error: candErr } = await admin
+        .from("clip_candidates")
+        .select(
+          "start_time,end_time,project_id,projects!inner(source_url,user_id)",
+        )
+        .eq("selected", true)
+        .eq("projects.source_url", sourceUrl)
+        .eq("projects.user_id", user.id)
+        .order("created_at", { ascending: false })
+        .limit(limit);
+      if (candErr) throw candErr;
+      for (const row of candRows || []) {
+        if (excludeProjectId && String(row.project_id) === excludeProjectId) continue;
+        push(Number(row.start_time), Number(row.end_time));
+      }
+
+      return ranges.slice(0, limit);
     }
     case "get_clip": {
       const clipId = String(body.clipId || "");

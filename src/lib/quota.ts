@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { FREE_DAILY_CLIP_LIMIT, type Plan, type UsageInfo } from "@/lib/types";
 
@@ -14,7 +15,8 @@ export async function getUserPlan(userId: string): Promise<Plan> {
   return data === "pro" ? "pro" : "free";
 }
 
-export async function getUsageInfo(userId: string): Promise<UsageInfo> {
+/** Deduped per request so shared (app) layout + pages share one quota lookup. */
+export const getUsageInfo = cache(async (userId: string): Promise<UsageInfo> => {
   const plan = await getUserPlan(userId);
   const { resetAt } = utcDayBounds();
 
@@ -57,7 +59,7 @@ export async function getUsageInfo(userId: string): Promise<UsageInfo> {
     resetAt,
     timezone: "UTC",
   };
-}
+});
 
 export async function reserveClipQuota(
   userId: string,

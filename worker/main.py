@@ -81,6 +81,48 @@ def _moment_from_dict(m: dict[str, Any]) -> MomentCandidate:
     )
 
 
+def _enforce_ai_clip_duration(
+    moment: MomentCandidate,
+    *,
+    target: float,
+    media_end: float | None,
+    min_start: float = 0.0,
+) -> MomentCandidate:
+    """Ensure AI moments match the user-selected duration before FFmpeg trim/export."""
+    target = max(5.0, min(180.0, float(target)))
+    start = float(moment.start)
+    end = float(moment.end)
+    lo = max(0.0, float(min_start))
+    hi = float(media_end) if media_end and media_end > 0 else None
+
+    start = max(lo, start)
+    if end <= start:
+        end = start + target
+    span = end - start
+    if span + 0.5 < target:
+        end = start + target
+        if hi is not None and end > hi:
+            end = hi
+            start = max(lo, end - target)
+    elif span > target + 0.05:
+        end = start + target
+        if hi is not None and end > hi:
+            end = hi
+            start = max(lo, end - target)
+
+    if abs(start - moment.start) < 0.05 and abs(end - moment.end) < 0.05:
+        return moment
+    return MomentCandidate(
+        start=start,
+        end=end,
+        title=moment.title,
+        hook=moment.hook,
+        score=moment.score,
+        explanation=moment.explanation,
+        id=moment.id,
+    )
+
+
 @dataclass
 class RenderTarget:
     moment: MomentCandidate
@@ -120,6 +162,7 @@ def _load_or_build_transcript(
     time_range: tuple[float, float] | None = None,
     source_duration: float | None = None,
     apply_ai_intro_skip: bool = False,
+    min_scout_chunk_seconds: float | None = None,
 ) -> list[TranscriptSegment]:
     segments = load_cached_transcript(work_dir)
     from_db = False
@@ -161,6 +204,7 @@ def _load_or_build_transcript(
             time_range=time_range,
             source_duration=source_duration,
             apply_ai_intro_skip=apply_ai_intro_skip,
+            min_scout_chunk_seconds=min_scout_chunk_seconds,
         )
         if project_id:
             _persist_transcript(
@@ -190,9 +234,15 @@ def _sync_moment_candidates(
     clip_count: int,
     job_id: str,
 ) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for i, c in enumerate(candidates):
+        row = c.to_dict()
+        # First N are the variety-aware picks from analyze_moments.
+        row["selected"] = i < max(1, int(clip_count))
+        payload.append(row)
     rows = repo.replace_clip_candidates(
         project_id,
-        [c.to_dict() for c in candidates],
+        payload,
         selected_count=clip_count,
     )
     repo.update_progress(
@@ -222,6 +272,7 @@ def _download_segments_for_targets(
     local_media_path: Path | None,
     check_cancel,
     on_progress,
+    segment_padding: float | None = None,
 ) -> list[Path]:
     """Download clip windows; parallelize when rendering 2+ clips (bounded pool)."""
     n = len(targets)
@@ -238,6 +289,7 @@ def _download_segments_for_targets(
             start=moment.start,
             end=moment.end,
             index=i,
+            padding=segment_padding,
             settings=settings,
             local_media_path=local_media_path,
         )
@@ -293,6 +345,7 @@ def _render_and_upload_clips(
     burn_captions: bool = True,
     crop_settings: dict[str, Any] | None = None,
     local_media_path: Path | None = None,
+    segment_padding: float | None = None,
 ) -> list[dict[str, Any]]:
     total = max(1, len(targets))
     repo.update_progress(
@@ -323,6 +376,7 @@ def _render_and_upload_clips(
         local_media_path=local_media_path,
         check_cancel=check_cancel,
         on_progress=_on_dl_progress,
+        segment_padding=segment_padding,
     )
     if not segment_paths:
         return []
@@ -386,6 +440,7 @@ def _render_and_upload_clips(
             crop_settings=crop_settings,
             quality=quality,
             settings=settings,
+            segment_padding=segment_padding,
         )
         meta = upload_clip(
             rendered,
@@ -635,6 +690,10 @@ def _process_full_pipeline(
             source_duration=probe.duration,
             # Kick/Twitch scout ASR skips intro only in AI mode; custom windows untouched.
             apply_ai_intro_skip=(clip_mode == "ai"),
+            # Scout chunks must cover the selected clip length (60s/120s), not a 90s default.
+            min_scout_chunk_seconds=(
+                max_clip_duration + 15.0 if clip_mode == "ai" else None
+            ),
         )
         if not segments:
             return
@@ -704,12 +763,24 @@ def _process_full_pipeline(
                 if filtered:
                     candidates = filtered
         else:
+            prior_ranges: list[tuple[float, float]] = []
+            if user_id and clip_mode == "ai":
+                try:
+                    prior_ranges = repo.fetch_prior_clip_ranges(
+                        user_id=str(user_id),
+                        source_url=str(source_url),
+                        exclude_project_id=project_id,
+                    )
+                except Exception as exc:
+                    logger.warning("Prior clip history unavailable: %s", exc)
             candidates = analyze_moments(
                 segments,
                 clip_count=clip_count,
                 max_clip_duration=max_clip_duration,
                 settings=settings,
                 intro_skip_seconds=float(settings.ai_intro_skip_seconds),
+                exclude_ranges=prior_ranges,
+                source_duration=float(probe.duration) if probe.duration else None,
             )
             analyzed_fresh = True
 
@@ -741,12 +812,28 @@ def _process_full_pipeline(
                     ]
             targets = _targets_from_candidate_rows(selected_rows)
         else:
-            selected = sorted(candidates, key=lambda c: c.score, reverse=True)[:clip_count]
-            targets = [RenderTarget(moment=m) for m in selected]
+            # Analyzer already returns selected-first (do not re-rank by score).
+            targets = [RenderTarget(moment=m) for m in candidates[:clip_count]]
 
         if not targets:
             repo.mark_failed(job, "No clip candidates found")
             return
+
+        # Custom/live keep exact windows; AI must honor the selected clip length.
+        if clip_mode == "ai":
+            intro_floor = effective_intro_skip_seconds(
+                float(settings.ai_intro_skip_seconds),
+                segments,
+                max_clip_duration=max_clip_duration,
+            )
+            media_end = float(probe.duration) if probe.duration else None
+            for t in targets:
+                t.moment = _enforce_ai_clip_duration(
+                    t.moment,
+                    target=max_clip_duration,
+                    media_end=media_end,
+                    min_start=intro_floor,
+                )
 
         if check_cancel():
             return
@@ -810,6 +897,8 @@ def _process_full_pipeline(
             burn_captions=burn_captions,
             crop_settings=crop_settings,
             local_media_path=live_file,
+            # AI: exact user-selected duration. Custom/live keep default edge padding.
+            segment_padding=0.0 if clip_mode == "ai" else None,
         )
         if check_cancel() or not clips_out:
             return

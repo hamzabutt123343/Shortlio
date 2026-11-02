@@ -1,7 +1,9 @@
+import { cache } from "react";
 import { createClient } from "@/lib/supabase/server";
 import type { User } from "@supabase/supabase-js";
 
-export async function getSessionUser(): Promise<User | null> {
+/** Deduped per request so layout + page share one auth round-trip. */
+export const getSessionUser = cache(async (): Promise<User | null> => {
   try {
     if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
       return null;
@@ -13,7 +15,7 @@ export async function getSessionUser(): Promise<User | null> {
   } catch {
     return null;
   }
-}
+});
 
 export async function requireUser(): Promise<User> {
   const user = await getSessionUser();

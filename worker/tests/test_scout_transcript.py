@@ -23,6 +23,12 @@ def test_scout_windows_respects_intro_skip():
     assert windows[0][0] >= 119.0
 
 
+def test_scout_windows_can_cover_two_minute_clips():
+    windows = _scout_windows(21303, budget=1200, chunk=135, skip_start=120.0)
+    assert windows
+    assert all((e - s) >= 120.0 for s, e in windows)
+
+
 def test_coverage_and_merge():
     existing = [
         TranscriptSegment(0, 10, "hello"),

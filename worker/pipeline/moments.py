@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 import httpx
 
@@ -20,10 +21,15 @@ _MIN_QUALITY_SCORE = 0.48
 _SOFT_QUALITY_SCORE = 0.20
 # Prefer at least this much separation between auto-picked clips.
 _OVERLAP_IOU_MAX = 0.35
+# History overlap: treat prior clips as used when IoU exceeds this.
+_HISTORY_IOU_MAX = 0.25
 # Default AI intro exclusion (greetings / welcome-back); overridden by Settings.
 DEFAULT_AI_INTRO_SKIP_SECONDS = 120.0
+# Allow tiny underflow vs target when source media ends (ffmpeg rounding / pad).
+_DURATION_TOLERANCE = 1.5
 _WORD_RE = re.compile(r"[A-Za-z\u0900-\u097F']+")
 SENTENCE_END = re.compile(r"[.!?…]\s+")
+TimeRange = tuple[float, float]
 
 
 def effective_intro_skip_seconds(
@@ -442,7 +448,12 @@ def _signal_hits(lower: str) -> list[str]:
     return hits
 
 
-def _score_text(text: str, *, duration: float) -> tuple[float, list[str]]:
+def _score_text(
+    text: str,
+    *,
+    duration: float,
+    target_duration: float | None = None,
+) -> tuple[float, list[str]]:
     """Score viral potential from grounded transcript signals only."""
     lower = (text or "").lower()
     words = _normalize_words(text)
@@ -492,17 +503,26 @@ def _score_text(text: str, *, duration: float) -> tuple[float, list[str]]:
         score -= 0.08
         reasons.append("filler_heavy")
 
-    # Prefer Shorts-friendly length; allow up to 3 min without hard penalty
-    # (user can request 1–3 min via max_clip_duration).
-    if 15.0 <= duration <= 60.0:
-        score += 0.07
-        reasons.append("ideal_len")
+    # Prefer the user-selected target length (60s / 120s / …), not a fixed ~20s Shorts bias.
+    target = float(target_duration) if target_duration and target_duration > 0 else None
+    if target:
+        ratio = duration / target
+        if 0.9 <= ratio <= 1.05:
+            score += 0.14
+            reasons.append("on_target_len")
+        elif 0.75 <= ratio < 0.9:
+            score -= 0.06
+            reasons.append("under_target")
+        elif ratio < 0.75:
+            # Root cause of ~20s clips when user asked for 60/120: short windows won scoring.
+            score -= 0.22
+            reasons.append("too_short_vs_target")
+        elif ratio > 1.08:
+            score -= 0.1
+            reasons.append("over_target")
     elif duration < 10.0 or duration > 180.0:
         score -= 0.06
         reasons.append("awkward_len")
-    elif duration > 120.0:
-        score -= 0.02
-        reasons.append("long_clip")
 
     # Payoff near the end of the window
     tail = lower[max(0, len(lower) - 140) :]
@@ -535,6 +555,134 @@ def _score_text(text: str, *, duration: float) -> tuple[float, list[str]]:
 
     score = max(0.0, min(0.99, score))
     return score, reasons
+
+
+def _text_in_range(segments: list[TranscriptSegment], start: float, end: float) -> str:
+    return " ".join(
+        (s.text or "").strip()
+        for s in segments
+        if s.end > start and s.start < end and (s.text or "").strip()
+    ).strip()
+
+
+def _fit_window_to_target(
+    peak_start: float,
+    peak_end: float,
+    segments: list[TranscriptSegment],
+    target: float,
+    *,
+    media_end: float | None = None,
+    min_start: float = 0.0,
+) -> tuple[float, float, str] | None:
+    """Expand/contract a peak so the clip is ~target seconds (exact user selection).
+
+    Hook stays near the open. Only shorten below target when the source ends.
+    """
+    if not segments or target <= 0:
+        return None
+    lo = max(0.0, float(min_start))
+    hi = float(media_end) if media_end and media_end > 0 else max(float(s.end) for s in segments)
+    if hi <= lo + 5.0:
+        return None
+
+    peak_start = float(peak_start)
+    peak_end = float(peak_end)
+    if peak_end <= peak_start:
+        peak_end = peak_start + min(8.0, target * 0.2)
+
+    # Prefer keeping the detected hook at the start of the exported clip.
+    start = max(lo, peak_start)
+    end = start + target
+    if end > hi:
+        # Shift earlier to preserve full target length when possible.
+        end = hi
+        start = max(lo, end - target)
+    # Never exceed target; only fall short when media is shorter than requested.
+    if end - start > target + 0.05:
+        end = start + target
+    if end - start < 5.0:
+        return None
+
+    text = _text_in_range(segments, start, end)
+    if not text:
+        # Fall back to original peak text if expansion landed in a scout gap.
+        text = _text_in_range(segments, peak_start, peak_end)
+    if not text:
+        return None
+    return start, end, text
+
+
+def _overlaps_history(
+    start: float,
+    end: float,
+    history: Sequence[TimeRange],
+    *,
+    iou_max: float = _HISTORY_IOU_MAX,
+) -> bool:
+    return any(_iou(start, end, h0, h1) > iou_max for h0, h1 in history)
+
+
+def _select_moments_with_variety(
+    cands: list[MomentCandidate],
+    *,
+    clip_count: int,
+    exclude_ranges: Sequence[TimeRange] | None = None,
+    rng: random.Random | None = None,
+) -> list[MomentCandidate]:
+    """Pick clip_count moments, preferring unused timestamps with light randomization.
+
+    Previously always took the top score → same URL always yielded the same clips.
+    """
+    if not cands:
+        return []
+    want = max(1, int(clip_count))
+    rng = rng or random.Random()
+    history = list(exclude_ranges or [])
+
+    fresh: list[MomentCandidate] = []
+    reused: list[MomentCandidate] = []
+    for c in sorted(cands, key=lambda x: x.score, reverse=True):
+        if _overlaps_history(c.start, c.end, history):
+            reused.append(c)
+        else:
+            fresh.append(c)
+
+    def _weighted_pick(pool: list[MomentCandidate], n: int) -> list[MomentCandidate]:
+        if not pool or n <= 0:
+            return []
+        # Explore among the strongest alternatives (not only rank #1).
+        top_k = pool[: max(n * 4, min(len(pool), 12))]
+        picked: list[MomentCandidate] = []
+        remaining = list(top_k)
+        while remaining and len(picked) < n:
+            weights = [max(0.05, c.score) ** 1.5 for c in remaining]
+            choice = rng.choices(remaining, weights=weights, k=1)[0]
+            if any(_iou(choice.start, choice.end, p.start, p.end) > _OVERLAP_IOU_MAX for p in picked):
+                remaining.remove(choice)
+                continue
+            picked.append(choice)
+            remaining.remove(choice)
+        # Fill deterministically if random collisions exhausted the pool.
+        if len(picked) < n:
+            for c in pool:
+                if len(picked) >= n:
+                    break
+                if c in picked:
+                    continue
+                if any(_iou(c.start, c.end, p.start, p.end) > _OVERLAP_IOU_MAX for p in picked):
+                    continue
+                picked.append(c)
+        return picked
+
+    selected = _weighted_pick(fresh, want)
+    if len(selected) < want:
+        # Only repeat prior segments when no suitable alternatives remain.
+        selected.extend(_weighted_pick(reused, want - len(selected)))
+
+    # Return selected first (for DB "selected" flags), then unused alternatives.
+    selected_ids = {id(c) for c in selected}
+    alternatives = [c for c in cands if id(c) not in selected_ids]
+    return selected + alternatives
 
 
 def _title_from_text(text: str) -> str:
@@ -621,23 +769,36 @@ def _snap_to_segments(
     start: float,
     end: float,
     segments: list[TranscriptSegment],
-    max_duration: float,
+    target_duration: float,
+    *,
+    media_end: float | None = None,
+    min_start: float = 0.0,
 ) -> tuple[float, float, str] | None:
-    """Clamp LLM times onto real transcript coverage."""
+    """Snap LLM times onto transcript, then fit to the user-selected target length."""
     if not segments or end <= start:
         return None
     covered = [s for s in segments if s.end >= start and s.start <= end]
     if not covered:
-        # Nearest segment window
         nearest = min(segments, key=lambda s: abs(((s.start + s.end) / 2) - (start + end) / 2))
         covered = [nearest]
     s0 = float(covered[0].start)
     s1 = float(covered[-1].end)
-    if s1 - s0 > max_duration:
-        s1 = s0 + max_duration
+    fitted = _fit_window_to_target(
+        s0,
+        s1,
+        segments,
+        float(target_duration),
+        media_end=media_end,
+        min_start=min_start,
+    )
+    if fitted:
+        return fitted
     text = " ".join((s.text or "").strip() for s in covered if (s.text or "").strip()).strip()
     if not text or s1 - s0 < 5.0:
         return None
+    # Last resort: clamp to target ceiling without inventing media past coverage.
+    if s1 - s0 > target_duration:
+        s1 = s0 + target_duration
     return s0, s1, text
 
 
@@ -650,6 +811,9 @@ class MomentAnalyzer(ABC):
         clip_count: int,
         max_clip_duration: float,
         intro_skip_seconds: float = 0.0,
+        exclude_ranges: Sequence[TimeRange] | None = None,
+        source_duration: float | None = None,
+        rng: random.Random | None = None,
     ) -> list[MomentCandidate]:
         raise NotImplementedError
 
@@ -664,17 +828,28 @@ class HeuristicAnalyzer(MomentAnalyzer):
         clip_count: int,
         max_clip_duration: float,
         intro_skip_seconds: float = 0.0,
+        exclude_ranges: Sequence[TimeRange] | None = None,
+        source_duration: float | None = None,
+        rng: random.Random | None = None,
     ) -> list[MomentCandidate]:
+        target = max(5.0, min(180.0, float(max_clip_duration or 45.0)))
         skip = effective_intro_skip_seconds(
-            intro_skip_seconds, segments, max_clip_duration=max_clip_duration
+            intro_skip_seconds, segments, max_clip_duration=target
         )
         usable = filter_segments_after_intro(segments, skip)
         if not usable:
             return []
 
-        sentence_chunks = _sentences_from_segments(usable, max_clip_duration)
-        window_chunks = _sliding_windows(usable, max_clip_duration)
-        # Prefer sentence boundaries; fill gaps with sliding windows.
+        media_end = (
+            float(source_duration)
+            if source_duration and source_duration > 0
+            else max(float(s.end) for s in usable)
+        )
+
+        # Short sentence peaks are anchors only — always expand to the selected duration.
+        # Sliding windows are already ~target length and catch gaps between sentences.
+        sentence_chunks = _sentences_from_segments(usable, min(45.0, target))
+        window_chunks = _sliding_windows(usable, target)
         seen: set[tuple[int, int]] = set()
         pooled: list[tuple[float, float, str]] = []
         for start, end, text in [*sentence_chunks, *window_chunks]:
@@ -687,16 +862,28 @@ class HeuristicAnalyzer(MomentAnalyzer):
             pooled.append((start, end, text))
 
         candidates: list[MomentCandidate] = []
-        for start, end, text in pooled:
-            if start < skip:
+        for peak_start, peak_end, _peak_text in pooled:
+            if peak_start < skip:
                 continue
+            fitted = _fit_window_to_target(
+                peak_start,
+                peak_end,
+                usable,
+                target,
+                media_end=media_end,
+                min_start=skip,
+            )
+            if not fitted:
+                continue
+            start, end, text = fitted
             words = _normalize_words(text)
             if len(words) < 8:
                 continue
             duration = max(0.1, end - start)
-            score, reasons = _score_text(text, duration=duration)
-            # Keep a wide pool; _quality_gate trims to clip_count with a soft floor.
-            # (0.28 was dropping most Hinglish windows → only 1 clip rendered.)
+            # Reject windows that are far under target unless the source itself is short.
+            if duration + _DURATION_TOLERANCE < target * 0.85 and media_end - skip >= target:
+                continue
+            score, reasons = _score_text(text, duration=duration, target_duration=target)
             if score < 0.18:
                 continue
             hits = _signal_hits(text.lower())
@@ -717,7 +904,13 @@ class HeuristicAnalyzer(MomentAnalyzer):
             )
 
         candidates = _dedupe_moments(candidates)
-        return _quality_gate(candidates, clip_count=clip_count)
+        gated = _quality_gate(candidates, clip_count=clip_count)
+        return _select_moments_with_variety(
+            gated,
+            clip_count=clip_count,
+            exclude_ranges=exclude_ranges,
+            rng=rng,
+        )
 
 
 class GroqJsonAnalyzer(MomentAnalyzer):
@@ -731,11 +924,15 @@ class GroqJsonAnalyzer(MomentAnalyzer):
         clip_count: int,
         max_clip_duration: float,
         intro_skip_seconds: float = 0.0,
+        exclude_ranges: Sequence[TimeRange] | None = None,
+        source_duration: float | None = None,
+        rng: random.Random | None = None,
     ) -> list[MomentCandidate]:
         if not self.settings.groq_api_key.strip():
             raise RuntimeError("GROQ_API_KEY not set")
+        target = max(5.0, min(180.0, float(max_clip_duration or 45.0)))
         skip = effective_intro_skip_seconds(
-            intro_skip_seconds, segments, max_clip_duration=max_clip_duration
+            intro_skip_seconds, segments, max_clip_duration=target
         )
         usable = filter_segments_after_intro(segments, skip)
         if not usable:
@@ -748,8 +945,8 @@ class GroqJsonAnalyzer(MomentAnalyzer):
             "Rules:\n"
             "- Prefer strong hooks, drama, humor, surprises, or emotional payoffs.\n"
             "- Use ONLY events stated in the transcript — never invent.\n"
-            "- Align start/end to the given timestamps; clips <= "
-            f"{max_clip_duration}s.\n"
+            f"- Each clip MUST be approximately {target:.0f} seconds "
+            f"(start/end span ≈ {target:.0f}s; do not return 15–30s clips).\n"
             "- Skip boring greetings, CTAs, and duplicate moments.\n"
             f"- NEVER select a clip that starts before {skip:.0f}s "
             "(intro / cold-open exclusion).\n"
@@ -766,7 +963,8 @@ class GroqJsonAnalyzer(MomentAnalyzer):
             "model": "llama-3.3-70b-versatile",
             "messages": [{"role": "user", "content": prompt}],
             "response_format": {"type": "json_object"},
-            "temperature": 0.25,
+            # Slightly higher temp so repeated jobs explore alternative moments.
+            "temperature": 0.55,
         }
         with httpx.Client(timeout=120.0) as client:
             resp = client.post(
@@ -780,8 +978,11 @@ class GroqJsonAnalyzer(MomentAnalyzer):
             content,
             clip_count=clip_count,
             segments=usable,
-            max_clip_duration=max_clip_duration,
+            max_clip_duration=target,
             intro_skip_seconds=skip,
+            exclude_ranges=exclude_ranges,
+            source_duration=source_duration,
+            rng=rng,
         )
 
 
@@ -796,11 +997,15 @@ class GeminiJsonAnalyzer(MomentAnalyzer):
         clip_count: int,
         max_clip_duration: float,
         intro_skip_seconds: float = 0.0,
+        exclude_ranges: Sequence[TimeRange] | None = None,
+        source_duration: float | None = None,
+        rng: random.Random | None = None,
     ) -> list[MomentCandidate]:
         if not self.settings.gemini_api_key.strip():
             raise RuntimeError("GEMINI_API_KEY not set")
+        target = max(5.0, min(180.0, float(max_clip_duration or 45.0)))
         skip = effective_intro_skip_seconds(
-            intro_skip_seconds, segments, max_clip_duration=max_clip_duration
+            intro_skip_seconds, segments, max_clip_duration=target
         )
         usable = filter_segments_after_intro(segments, skip)
         if not usable:
@@ -811,8 +1016,9 @@ class GeminiJsonAnalyzer(MomentAnalyzer):
         prompt = (
             "Pick viral short-form moments from this timestamped transcript. "
             "Prefer hooks, drama, humor, surprise, emotional payoff. "
-            "Never invent events. Clips <= "
-            f"{max_clip_duration}s. Up to {clip_count * 2} items. "
+            "Never invent events. "
+            f"Each clip MUST be approximately {target:.0f} seconds long "
+            f"(not shorter 15–30s windows). Up to {clip_count * 2} items. "
             f"NEVER start a clip before {skip:.0f}s (intro exclusion). "
             'Return JSON {"moments":[{start,end,title,hook,score,explanation}]}.\n\n'
             f"{transcript}"
@@ -821,7 +1027,10 @@ class GeminiJsonAnalyzer(MomentAnalyzer):
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"gemini-2.0-flash:generateContent?key={self.settings.gemini_api_key}"
         )
-        body = {"contents": [{"parts": [{"text": prompt}]}]}
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.55},
+        }
         with httpx.Client(timeout=120.0) as client:
             resp = client.post(url, json=body)
             resp.raise_for_status()
@@ -830,8 +1039,11 @@ class GeminiJsonAnalyzer(MomentAnalyzer):
             content,
             clip_count=clip_count,
             segments=usable,
-            max_clip_duration=max_clip_duration,
+            max_clip_duration=target,
             intro_skip_seconds=skip,
+            exclude_ranges=exclude_ranges,
+            source_duration=source_duration,
+            rng=rng,
         )
 
 
@@ -842,6 +1054,9 @@ def _parse_llm_moments(
     segments: list[TranscriptSegment] | None = None,
     max_clip_duration: float = 45.0,
     intro_skip_seconds: float = 0.0,
+    exclude_ranges: Sequence[TimeRange] | None = None,
+    source_duration: float | None = None,
+    rng: random.Random | None = None,
 ) -> list[MomentCandidate]:
     text = raw.strip()
     if text.startswith("```"):
@@ -850,6 +1065,8 @@ def _parse_llm_moments(
     data = json.loads(text)
     items = data if isinstance(data, list) else data.get("moments") or data.get("candidates") or []
     skip = max(0.0, float(intro_skip_seconds or 0.0))
+    target = max(5.0, min(180.0, float(max_clip_duration or 45.0)))
+    media_end = float(source_duration) if source_duration and source_duration > 0 else None
     out: list[MomentCandidate] = []
     for item in items:
         try:
@@ -862,14 +1079,23 @@ def _parse_llm_moments(
             score = float(item.get("score", 0.5))
             explanation = str(item.get("explanation", "LLM selected"))
             if segments:
-                snapped = _snap_to_segments(start, end, segments, max_clip_duration)
+                snapped = _snap_to_segments(
+                    start,
+                    end,
+                    segments,
+                    target,
+                    media_end=media_end,
+                    min_start=skip,
+                )
                 if not snapped:
                     continue
                 start, end, snap_text = snapped
                 if start < skip:
                     continue
                 # Re-score lightly with heuristics so invented high scores don't dominate.
-                h_score, reasons = _score_text(snap_text, duration=end - start)
+                h_score, reasons = _score_text(
+                    snap_text, duration=end - start, target_duration=target
+                )
                 score = max(0.0, min(0.99, 0.55 * score + 0.45 * h_score))
                 if not hook.strip():
                     hook = _hook_from_text(snap_text)
@@ -893,7 +1119,13 @@ def _parse_llm_moments(
         except (KeyError, TypeError, ValueError):
             continue
     out = _dedupe_moments(out)
-    return _quality_gate(out, clip_count=clip_count)
+    gated = _quality_gate(out, clip_count=clip_count)
+    return _select_moments_with_variety(
+        gated,
+        clip_count=clip_count,
+        exclude_ranges=exclude_ranges,
+        rng=rng,
+    )
 
 
 def get_analyzer(settings: Settings | None = None) -> MomentAnalyzer:
@@ -912,6 +1144,9 @@ def analyze_moments(
     max_clip_duration: float = 45.0,
     settings: Settings | None = None,
     intro_skip_seconds: float | None = None,
+    exclude_ranges: Sequence[TimeRange] | None = None,
+    source_duration: float | None = None,
+    rng: random.Random | None = None,
 ) -> list[MomentCandidate]:
     settings = settings or get_settings()
     skip = (
@@ -927,19 +1162,17 @@ def analyze_moments(
             "AI intro skip: excluding first %.0fs from viral moment detection",
             skip,
         )
+    kwargs = dict(
+        clip_count=clip_count,
+        max_clip_duration=max_clip_duration,
+        intro_skip_seconds=skip,
+        exclude_ranges=exclude_ranges,
+        source_duration=source_duration,
+        rng=rng,
+    )
     primary = get_analyzer(settings)
     try:
-        return primary.analyze(
-            segments,
-            clip_count=clip_count,
-            max_clip_duration=max_clip_duration,
-            intro_skip_seconds=skip,
-        )
+        return primary.analyze(segments, **kwargs)
     except Exception as exc:
         logger.warning("Primary analyzer failed (%s), using heuristic", exc)
-        return HeuristicAnalyzer().analyze(
-            segments,
-            clip_count=clip_count,
-            max_clip_duration=max_clip_duration,
-            intro_skip_seconds=skip,
-        )
+        return HeuristicAnalyzer().analyze(segments, **kwargs)

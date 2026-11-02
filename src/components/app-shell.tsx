@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useEffectEvent } from "react";
 import {
   CreditCard,
   LayoutDashboard,
@@ -27,6 +27,18 @@ const links = [
   { href: "/billing", label: "Billing", icon: CreditCard },
 ];
 
+function titleFromPath(pathname: string): string {
+  if (pathname.startsWith("/clips/")) return "Clip editor";
+  if (pathname.startsWith("/projects/") && pathname !== "/projects") return "Project";
+  if (pathname.startsWith("/create")) return "Create Clips";
+  if (pathname.startsWith("/projects")) return "Projects";
+  if (pathname.startsWith("/templates")) return "Templates";
+  if (pathname.startsWith("/settings")) return "Settings";
+  if (pathname.startsWith("/billing")) return "Billing";
+  if (pathname.startsWith("/dashboard")) return "Dashboard";
+  return "Video workspace";
+}
+
 export function AppShell({
   children,
   planLabel,
@@ -36,6 +48,7 @@ export function AppShell({
   children: React.ReactNode;
   planLabel?: string;
   usageLabel?: string;
+  /** Optional override; defaults from pathname for snappy shared-layout nav. */
   title?: string;
 }) {
   const pathname = usePathname();
@@ -43,6 +56,19 @@ export function AppShell({
   const [email, setEmail] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [desktopOnline, setDesktopOnline] = useState(false);
+  const [navPending, setNavPending] = useState(false);
+
+  const headerTitle = title ?? titleFromPath(pathname);
+
+  const onPathChange = useEffectEvent((path: string) => {
+    setNavPending(false);
+    setMenuOpen(false);
+    void path;
+  });
+
+  useEffect(() => {
+    onPathChange(pathname);
+  }, [pathname]);
 
   useEffect(() => {
     const supabase = createClient();
@@ -52,6 +78,11 @@ export function AppShell({
     setDesktopOnline(isShortlioDesktop());
   }, []);
 
+  function markNavStart(href: string) {
+    if (href === pathname) return;
+    setNavPending(true);
+  }
+
   async function signOut() {
     const supabase = createClient();
     await supabase.auth.signOut();
@@ -60,11 +91,20 @@ export function AppShell({
   }
 
   return (
-    <div className="min-h-screen bg-[var(--bg)] md:grid md:grid-cols-[240px_1fr]">
+    <div className="relative min-h-screen bg-[var(--bg)] md:grid md:grid-cols-[240px_1fr]">
+      {navPending && (
+        <div
+          className="pointer-events-none absolute inset-x-0 top-0 z-50 h-0.5 overflow-hidden bg-[var(--border)]"
+          aria-hidden
+        >
+          <div className="h-full w-1/3 animate-[shortlio-nav-slide_0.7s_ease-in-out_infinite] bg-[var(--accent)]" />
+        </div>
+      )}
       <aside className="border-b border-[var(--border)] bg-[var(--bg-elevated)]/50 md:sticky md:top-0 md:flex md:h-screen md:flex-col md:border-b-0 md:border-r">
         <div className="flex items-center justify-between px-4 py-4 md:block">
           <Link
             href="/dashboard"
+            onClick={() => markNavStart("/dashboard")}
             className="flex items-center gap-2.5 font-[family-name:var(--font-display)] text-lg font-bold tracking-tight"
           >
             <BrandLogo size={32} />
@@ -87,8 +127,9 @@ export function AppShell({
                 <Link
                   key={link.href}
                   href={link.href}
+                  onClick={() => markNavStart(link.href)}
                   className={cn(
-                    "flex shrink-0 items-center gap-2.5 rounded-[10px] px-3 py-2 text-sm transition",
+                    "flex shrink-0 items-center gap-2.5 rounded-[10px] px-3 py-2 text-sm transition-colors duration-100",
                     active
                       ? "bg-[var(--accent-dim)] text-[var(--accent)]"
                       : "text-[var(--text-muted)] hover:bg-white/5 hover:text-[var(--text)]",
@@ -117,7 +158,7 @@ export function AppShell({
           <button
             type="button"
             onClick={signOut}
-            className="flex w-full items-center gap-2 rounded-[10px] px-2 py-2 text-sm text-[var(--text-muted)] transition hover:bg-white/5 hover:text-[var(--text)]"
+            className="flex w-full items-center gap-2 rounded-[10px] px-2 py-2 text-sm text-[var(--text-muted)] transition-colors duration-100 hover:bg-white/5 hover:text-[var(--text)]"
           >
             <LogOut className="h-4 w-4" />
             Sign out
@@ -128,24 +169,24 @@ export function AppShell({
       <div className="flex min-w-0 flex-col">
         <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg)]/90 px-4 backdrop-blur-md md:px-8">
           <div className="min-w-0">
-            {title ? (
-              <p className="truncate text-sm font-medium text-[var(--text)]">{title}</p>
-            ) : (
-              <p className="truncate text-sm text-[var(--text-muted)]">Video workspace</p>
-            )}
+            <p className="truncate text-sm font-medium text-[var(--text)]">{headerTitle}</p>
           </div>
           <div className="flex items-center gap-2">
             {usageLabel && (
               <p className="hidden text-xs text-[var(--text-muted)] lg:block">{usageLabel}</p>
             )}
             {planLabel === "Basic" && (
-              <Link href="/billing" className="hidden sm:block">
+              <Link
+                href="/billing"
+                onClick={() => markNavStart("/billing")}
+                className="hidden sm:block"
+              >
                 <Button variant="secondary" className="px-3 py-1.5 text-xs">
                   Upgrade
                 </Button>
               </Link>
             )}
-            <Link href="/create">
+            <Link href="/create" onClick={() => markNavStart("/create")}>
               <Button className="px-3 py-1.5 text-xs sm:text-sm">
                 <PlusCircle className="h-3.5 w-3.5" />
                 <span className="hidden sm:inline">Create</span>
@@ -171,7 +212,10 @@ export function AppShell({
                     href="/settings"
                     role="menuitem"
                     className="block px-3 py-2 text-sm text-[var(--text-muted)] hover:bg-white/5 hover:text-[var(--text)]"
-                    onClick={() => setMenuOpen(false)}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      markNavStart("/settings");
+                    }}
                   >
                     Settings
                   </Link>
@@ -179,7 +223,10 @@ export function AppShell({
                     href="/billing"
                     role="menuitem"
                     className="block px-3 py-2 text-sm text-[var(--text-muted)] hover:bg-white/5 hover:text-[var(--text)]"
-                    onClick={() => setMenuOpen(false)}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      markNavStart("/billing");
+                    }}
                   >
                     Billing
                   </Link>

@@ -260,3 +260,12 @@ a {
     background-position: -100% 0;
   }
 }
+
+@keyframes shortlio-nav-slide {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}

@@ -186,19 +186,25 @@ class JobRepository:
         *,
         selected_count: int,
     ) -> list[dict[str, Any]]:
-        """Replace candidates for a project; mark top `selected_count` by score as selected."""
+        """Replace candidates for a project.
+
+        Preserves analyzer order: the first `selected_count` entries are marked
+        selected (variety-aware picks). Explicit `selected` flags on candidates
+        win when present.
+        """
         self.client.table("clip_candidates").delete().eq(
             "project_id", project_id
         ).execute()
         if not candidates:
             return []
-        sorted_cands = sorted(
-            candidates, key=lambda c: float(c.get("score", 0)), reverse=True
-        )
         rows: list[dict[str, Any]] = []
-        for i, c in enumerate(sorted_cands):
+        for i, c in enumerate(candidates):
             start = float(c["start"])
             end = float(c["end"])
+            if "selected" in c:
+                is_selected = bool(c.get("selected"))
+            else:
+                is_selected = i < selected_count
             rows.append(
                 {
                     "project_id": project_id,
@@ -211,7 +217,7 @@ class JobRepository:
                     "confidence": c.get("confidence"),
                     "recommended_duration": c.get("recommended_duration")
                     or max(0.0, end - start),
-                    "selected": i < selected_count,
+                    "selected": is_selected,
                 }
             )
         inserted: list[dict[str, Any]] = []
@@ -252,6 +258,76 @@ class JobRepository:
         )
         by_id = {str(r["id"]): r for r in (resp.data or [])}
         return [by_id[cid] for cid in candidate_ids if cid in by_id]
+
+    def fetch_prior_clip_ranges(
+        self,
+        *,
+        user_id: str,
+        source_url: str,
+        exclude_project_id: str | None = None,
+        limit: int = 80,
+    ) -> list[tuple[float, float]]:
+        """Prior selected timestamps for this source URL (variety across re-runs)."""
+        if not user_id or not source_url:
+            return []
+        ranges: list[tuple[float, float]] = []
+        seen: set[tuple[int, int]] = set()
+
+        def _add(start: float, end: float) -> None:
+            if end <= start:
+                return
+            key = (int(start * 10), int(end * 10))
+            if key in seen:
+                return
+            seen.add(key)
+            ranges.append((float(start), float(end)))
+
+        # Rendered clips from prior projects with the same URL.
+        try:
+            q = (
+                self.client.table("clips")
+                .select("start_time,end_time,project_id,projects!inner(source_url,user_id)")
+                .eq("user_id", user_id)
+                .eq("projects.source_url", source_url)
+                .order("created_at", desc=True)
+                .limit(limit)
+            )
+            resp = q.execute()
+            for row in resp.data or []:
+                if exclude_project_id and str(row.get("project_id")) == str(
+                    exclude_project_id
+                ):
+                    continue
+                _add(float(row["start_time"]), float(row["end_time"]))
+        except Exception as exc:
+            logger.warning("fetch_prior_clip_ranges clips query failed: %s", exc)
+
+        # Selected AI candidates that may not have finished rendering yet.
+        try:
+            q = (
+                self.client.table("clip_candidates")
+                .select(
+                    "start_time,end_time,project_id,projects!inner(source_url,user_id)"
+                )
+                .eq("selected", True)
+                .eq("projects.source_url", source_url)
+                .eq("projects.user_id", user_id)
+                .order("created_at", desc=True)
+                .limit(limit)
+            )
+            resp = q.execute()
+            for row in resp.data or []:
+                if exclude_project_id and str(row.get("project_id")) == str(
+                    exclude_project_id
+                ):
+                    continue
+                _add(float(row["start_time"]), float(row["end_time"]))
+        except Exception as exc:
+            logger.warning(
+                "fetch_prior_clip_ranges candidates query failed: %s", exc
+            )
+
+        return ranges[:limit]
 
     def get_clip(self, clip_id: str) -> dict[str, Any] | None:
         resp = (

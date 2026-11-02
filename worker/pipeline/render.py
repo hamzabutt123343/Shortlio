@@ -255,6 +255,7 @@ def render_moment_clip(
     crop_settings: dict[str, Any] | None = None,
     quality: str = "draft",
     settings: Settings | None = None,
+    segment_padding: float | None = None,
 ) -> tuple[Path, ReframePlan]:
     settings = settings or get_settings()
     work_dir = settings.resolved_temp_dir() / job_id / "render"
@@ -349,7 +350,11 @@ def render_moment_clip(
         # Mirror into job dir for debugging
         save_plan(work_dir / f"plan_{index:03d}.json", plan)
 
-    pad = settings.segment_padding_seconds
+    pad = (
+        float(settings.segment_padding_seconds)
+        if segment_padding is None
+        else max(0.0, float(segment_padding))
+    )
     clip_start = max(0.0, moment_start - pad)
     clip_end = moment_end + pad
 
